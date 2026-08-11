@@ -44,7 +44,7 @@ def poll(state_path, messages, **overrides):
     monitor.fetch_via_bot = lambda cfg, st: (messages, dict(st))
     args = Namespace(config=None, state=str(state_path), notify=False, dry_run=False,
                      format="json", replay=None, self_test=False, github_output=False,
-                     **overrides)
+                     test_alert=False, dump=False, **overrides)
     buf = StringIO()
     with redirect_stdout(buf):
         monitor.run_poll(dict(CONFIG), args)
@@ -104,7 +104,8 @@ def main():
         dry = Path(tmp) / "dry.json"
         monitor.fetch_via_bot = lambda cfg, st: ([msg(9, "iPhone SE R$ 1.200,00")], dict(st))
         args = Namespace(config=None, state=str(dry), notify=True, dry_run=True,
-                         format="json", replay=None, self_test=False, github_output=False)
+                         format="json", replay=None, self_test=False, github_output=False,
+                         test_alert=False, dump=False)
         with redirect_stdout(StringIO()):
             monitor.run_poll(dict(CONFIG), args)
         check("dry-run writes no state", dry.exists(), False)

@@ -854,7 +854,7 @@ def run_poll(config: dict, args) -> int:
         else:
             sys.exit(f"error: unknown source '{source}' (expected 'user', 'bot', or 'web')")
 
-    if args.dump:
+    if getattr(args, "dump", False):
         # Diagnostic: tells "nothing matched" apart from "nothing was read".
         print(f"fetched {len(messages)} message(s) from "
               f"{config.get('telegram', {}).get('channel') or config.get('source')}\n")
