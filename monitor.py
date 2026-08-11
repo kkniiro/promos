@@ -163,14 +163,24 @@ def extract_prices(text: str) -> list[float]:
 # Config
 # --------------------------------------------------------------------------
 
-def _expand_env(value):
-    """Resolve ${VAR} references so secrets stay out of the config file."""
+def _expand_env(value, missing: set | None = None):
+    """Resolve ${VAR} references so secrets stay out of the config file.
+
+    Names that resolve to nothing are collected, so a config that looks blank
+    can say which secret was never set instead of just "this field is empty".
+    """
     if isinstance(value, str):
-        return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), value)
+        def sub(match):
+            name = match.group(1)
+            resolved = os.environ.get(name, "")
+            if not resolved and missing is not None:
+                missing.add(name)
+            return resolved
+        return re.sub(r"\$\{(\w+)\}", sub, value)
     if isinstance(value, list):
-        return [_expand_env(v) for v in value]
+        return [_expand_env(v, missing) for v in value]
     if isinstance(value, dict):
-        return {k: _expand_env(v) for k, v in value.items()}
+        return {k: _expand_env(v, missing) for k, v in value.items()}
     return value
 
 
@@ -189,7 +199,10 @@ def load_config(path: Path) -> dict:
                      "       run: pip install pyyaml")
     if not isinstance(data, dict):
         sys.exit("error: config must be a mapping")
-    return _expand_env(data)
+    missing: set[str] = set()
+    expanded = _expand_env(data, missing)
+    expanded["unset_env"] = sorted(missing)
+    return expanded
 
 
 # What each delivery channel needs before it can send anything.
@@ -227,7 +240,17 @@ def validate_config(config: dict) -> None:
         missing = [f"{sect}.{key}" for sect, key in CHANNEL_REQUIREMENTS[name]
                    if not str((config.get(sect) or {}).get(key) or "").strip()]
         if missing:
-            sys.exit(f"error: notify_via '{name}' needs {', '.join(missing)} in config.yaml")
+            hint = ""
+            unset = config.get("unset_env") or []
+            if unset:
+                # The field is blank because a secret never arrived, which is a
+                # different fix from "you forgot to fill in the config".
+                hint = ("\n       these config values read unset environment "
+                        f"variables: {', '.join(unset)}"
+                        "\n       in CI, add them as repository secrets "
+                        "(Settings > Secrets and variables > Actions)")
+            sys.exit(f"error: notify_via '{name}' needs {', '.join(missing)} "
+                     f"in config.yaml{hint}")
 
 
 def compile_rules(config: dict) -> list[dict]:
@@ -1005,6 +1028,11 @@ def run_poll(config: dict, args) -> int:
         ],
     }
 
+    # In watch mode a quiet poll prints nothing, so 25 checks an hour do not
+    # bury the one line that matters.
+    if getattr(args, "quiet", False) and not hits:
+        return summary
+
     if args.format == "text":
         print(f"checked {considered} message(s) -- {len(hits)} match(es)"
               + (f", {skipped_old} skipped as older than {max_age}h" if skipped_old else ""))
@@ -1028,7 +1056,47 @@ def run_poll(config: dict, args) -> int:
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
             fh.write(f"match_count={len(hits)}\n")
 
-    return 0
+    return summary
+
+
+def run_watch(config: dict, args, _sleep=time.sleep, _now=time.time) -> int:
+    """Keep polling inside one process until the runtime budget is spent.
+
+    GitHub's scheduler decides how often a job *starts* -- observed at roughly
+    hourly however tight the cron is -- but not how often that job may check.
+    Polling in a loop takes the scheduler off the critical path: it only has
+    to relaunch us, and the interval below is what actually governs latency.
+
+    One bad poll (a network blip, a channel 404) must never end the loop, so
+    every iteration is isolated.
+    """
+    deadline = _now() + args.max_runtime
+    polls = matches = failures = 0
+    started = datetime.now(timezone.utc)
+    print(f"watching every {args.watch}s for up to {args.max_runtime // 60}min "
+          f"(from {started.isoformat(timespec='seconds')})", flush=True)
+
+    while _now() < deadline:
+        polls += 1
+        try:
+            summary = run_poll(config, args)
+            matches += (summary or {}).get("match_count", 0)
+        except SystemExit as exc:
+            failures += 1
+            print(f"warn: poll {polls}: {exc}", file=sys.stderr, flush=True)
+        except Exception as exc:                  # noqa: BLE001 - keep watching
+            failures += 1
+            print(f"warn: poll {polls} crashed: {exc!r}", file=sys.stderr, flush=True)
+
+        remaining = deadline - _now()
+        if remaining <= 0:
+            break
+        _sleep(min(args.watch, remaining))
+
+    print(f"watch finished: {polls} poll(s), {matches} match(es), "
+          f"{failures} failure(s)", flush=True)
+    # A loop where nothing ever succeeded is a broken deploy, not a quiet day.
+    return 1 if failures and failures == polls else 0
 
 
 def self_test() -> int:
@@ -1105,6 +1173,21 @@ def self_test() -> int:
     # Accent-insensitive rules
     ac = compile_rules({"rules": [{"name": "fone", "any": ["fone de ouvido"]}]})
     check("accent rule", len(match_rules("FONE DE OUVIDO em promoção", ac)), 1)
+
+    # ${VAR} expansion, and naming the vars that resolved to nothing.
+    os.environ["_PROMO_TEST_VAR"] = "resolved"
+    os.environ.pop("_PROMO_TEST_ABSENT", None)
+    seen_missing: set = set()
+    got = _expand_env({"a": "${_PROMO_TEST_VAR}",
+                       "b": {"c": "${_PROMO_TEST_ABSENT}"},
+                       "d": ["${_PROMO_TEST_VAR}", "literal"],
+                       "e": 42}, seen_missing)
+    check("env expands", got["a"], "resolved")
+    check("env expands nested", got["b"]["c"], "")
+    check("env expands in lists", got["d"], ["resolved", "literal"])
+    check("env leaves non-strings", got["e"], 42)
+    check("env names what is unset", sorted(seen_missing), ["_PROMO_TEST_ABSENT"])
+    del os.environ["_PROMO_TEST_VAR"]
 
     # contains + discount gates
     dr = compile_rules({"rules": [
@@ -1301,6 +1384,12 @@ def main() -> int:
                     help="send one fake alert to confirm delivery is wired up")
     ap.add_argument("--dump", action="store_true",
                     help="print what was actually fetched, to check the reader works")
+    ap.add_argument("--watch", type=int, metavar="SECONDS",
+                    help="keep polling every SECONDS instead of checking once")
+    ap.add_argument("--max-runtime", type=int, default=3300, metavar="SECONDS",
+                    help="with --watch, stop after this long (default 55min)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print nothing for a poll that found no matches")
     ap.add_argument("--github-output", action="store_true", help="emit match_count for Actions")
     args = ap.parse_args()
 
@@ -1329,7 +1418,10 @@ def main() -> int:
         return 1
 
     try:
-        return run_poll(config, args)
+        if args.watch:
+            return run_watch(config, args)
+        run_poll(config, args)
+        return 0
     except BrokenPipeError:
         # Someone piped us into `head`; that is not an error worth a traceback.
         try:

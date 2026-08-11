@@ -144,6 +144,65 @@ def main():
     got, _ = monitor.fetch_via_web(cfg, {})
     check("merged channels sort by time", [m["ts"] for m in got], [100, 200, 300])
 
+    # --- watch loop ----------------------------------------------------------
+    # A virtual clock, so a 55-minute budget is exercised instantly.
+    class Clock:
+        def __init__(self):
+            self.t = 1000.0
+        def now(self):
+            return self.t
+        def sleep(self, s):
+            self.t += s
+
+    def watch(poll_fn, interval=120, budget=600):
+        clock = Clock()
+        monitor.run_poll = poll_fn
+        args = Namespace(config=None, state=None, notify=False, dry_run=True,
+                         format="text", replay=None, self_test=False,
+                         github_output=False, test_alert=False, dump=False,
+                         watch=interval, max_runtime=budget, quiet=True)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            rc = monitor.run_watch({}, args, _sleep=clock.sleep, _now=clock.now)
+        return rc, buf.getvalue()
+
+    calls = []
+    rc, out = watch(lambda c, a: (calls.append(1), {"match_count": 0})[1])
+    # Polls land at t=0,120,240,360,480; t=600 is the deadline, not a 6th poll.
+    check("watch respects the budget", len(calls), 5)
+    check("watch exits clean", rc, 0)
+    check("watch reports totals", "5 poll(s)" in out, True)
+
+    # A network blip mid-loop must not end the watch.
+    calls.clear()
+
+    def flaky(cfg, a):
+        calls.append(1)
+        if len(calls) == 2:
+            raise SystemExit("error: cannot reach t.me")
+        if len(calls) == 3:
+            raise ValueError("unexpected")
+        return {"match_count": 1}
+
+    rc, out = watch(flaky)
+    check("watch survives a failed poll", len(calls), 5)
+    check("watch survives a crash", rc, 0)
+    check("watch counts matches", "3 match(es)" in out, True)
+    check("watch counts failures", "2 failure(s)" in out, True)
+
+    # Every poll failing is a broken deploy, and should fail the job.
+    def always_bad(cfg, a):
+        raise SystemExit("error: config is wrong")
+
+    rc, _ = watch(always_bad)
+    check("watch fails when nothing works", rc, 1)
+
+    # An interval longer than the remaining budget must not overshoot.
+    calls.clear()
+    rc, _ = watch(lambda c, a: (calls.append(1), {"match_count": 0})[1],
+                  interval=1000, budget=600)
+    check("watch does not overshoot", len(calls), 1)
+
     check("brl format", monitor.brl(4299.9), "R$ 4.299,90")
     check("brl thousands", monitor.brl(1234567.5), "R$ 1.234.567,50")
 

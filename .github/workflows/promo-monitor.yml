@@ -1,23 +1,33 @@
 name: promo monitor
 
-# Scheduled runs only happen on the DEFAULT branch. Until this file is merged
-# to main, use the "Run workflow" button (workflow_dispatch) to test it.
+# GitHub decides how often a scheduled job STARTS, and in practice throttles
+# that to roughly hourly no matter how tight the cron is. So the cron below is
+# not the polling rate -- it only relaunches the watcher. The watcher then
+# polls every INTERVAL seconds from inside a single job, which is what
+# actually determines how quickly a promo reaches your phone.
 on:
   schedule:
-    - cron: "*/10 * * * *"     # every 10 min; GitHub treats this as best-effort
+    - cron: "7 * * * *"        # relaunch hourly; the job itself runs ~55 min
   workflow_dispatch:
     inputs:
       mode:
         description: "What to do"
         type: choice
-        default: poll
+        default: watch
         options:
-          - poll          # normal run: check for matches and notify
+          - watch         # poll on a loop for the whole job (the normal mode)
+          - poll          # check once and exit
           - dry-run       # show matches, notify nothing, save nothing
           - test-alert    # send one fake alert to check delivery works
           - dump          # print every message read, to check the reader works
+      interval:
+        description: "Seconds between polls in watch mode"
+        default: "120"
 
-# Never let two runs race on the state.
+# One watcher at a time. cancel-in-progress must stay false: the hourly cron
+# leaves a run pending while the current one works, and that pending run
+# starts the moment the watcher exits -- which is what closes the handover gap
+# rather than waiting for the next cron.
 concurrency:
   group: promo-monitor
   cancel-in-progress: false
@@ -28,6 +38,9 @@ permissions:
 jobs:
   poll:
     runs-on: ubuntu-latest
+    # The hard ceiling is 6h per job. 60 lets the 55-minute watcher finish on
+    # its own terms, so the cache-save step below still runs.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +57,7 @@ jobs:
           python3 tests/test_dedupe.py
 
       # State lives in the Actions cache rather than in git, so the repo does
-      # not collect a commit every 10 minutes. A cache miss is safe: the
+      # not collect a commit every run. A cache miss is safe: the
       # max_age_hours guard stops an empty state replaying the whole backlog.
       # Cache keys are immutable, so each run writes a new one and restores the
       # most recent via the shared prefix.
@@ -72,15 +85,22 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
         run: |
-          case "${{ inputs.mode || 'poll' }}" in
+          case "${{ inputs.mode || 'watch' }}" in
             test-alert) python3 monitor.py --test-alert ;;
             dump)       python3 monitor.py --dump --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
             dry-run)    python3 monitor.py --format text --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
-            *)          python3 monitor.py --format text --notify --github-output | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            poll)       python3 monitor.py --format text --notify --github-output | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            *)          python3 monitor.py \
+                          --watch "${{ inputs.interval || '120' }}" \
+                          --max-runtime 3300 \
+                          --format text --notify --quiet \
+                          | tee -a "$GITHUB_STEP_SUMMARY" ;;
           esac
 
+      # Runs even if the watcher was cancelled, so a manual stop still keeps
+      # what it had already seen and does not re-alert it on the next start.
       - name: Save seen-message state
-        if: ${{ inputs.mode != 'dry-run' && inputs.mode != 'test-alert' }}
+        if: ${{ always() && inputs.mode != 'dry-run' && inputs.mode != 'test-alert' }}
         uses: actions/cache/save@v4
         with:
           path: state
