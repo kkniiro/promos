@@ -403,7 +403,14 @@ class _ChannelParser(HTMLParser):
             self._post = attrs["data-post"]
             self._time = None
         if tag == "time" and attrs.get("datetime") and self._post:
+            # Telegram renders <time> in the footer, AFTER the text block, so
+            # the post has already been emitted -- backfill it rather than
+            # stashing a value that would always still be None on emit.
             self._time = attrs["datetime"]
+            for post in reversed(self.posts):
+                if post["post"] == self._post:
+                    post["time"] = post["time"] or attrs["datetime"]
+                    break
         if self._depth:
             # Already inside a text block: keep track of nesting.
             if tag not in ("br", "img", "hr", "input", "meta", "link"):
@@ -1053,6 +1060,10 @@ def self_test() -> int:
     parser.feed(sample)
     check("html post count", len(parser.posts), 2)
     check("html first id", parser.posts[0]["post"], "promos/101")
+    # <time> sits after the text block, so this only passes if it is backfilled.
+    # Without a timestamp the max_age_hours flood guard silently does nothing.
+    check("html timestamp captured", parser.posts[0]["time"], "2026-08-11T10:00:00+00:00")
+    check("html missing time stays none", parser.posts[1]["time"], None)
     check("html nested tags", "Smart TV" in parser.posts[0]["text"], True)
     check("html br newline", "\n" in parser.posts[0]["text"], True)
     check("html entities", "&" in parser.posts[1]["text"], True)
