@@ -163,14 +163,24 @@ def extract_prices(text: str) -> list[float]:
 # Config
 # --------------------------------------------------------------------------
 
-def _expand_env(value):
-    """Resolve ${VAR} references so secrets stay out of the config file."""
+def _expand_env(value, missing: set | None = None):
+    """Resolve ${VAR} references so secrets stay out of the config file.
+
+    Names that resolve to nothing are collected, so a config that looks blank
+    can say which secret was never set instead of just "this field is empty".
+    """
     if isinstance(value, str):
-        return re.sub(r"\$\{(\w+)\}", lambda m: os.environ.get(m.group(1), ""), value)
+        def sub(match):
+            name = match.group(1)
+            resolved = os.environ.get(name, "")
+            if not resolved and missing is not None:
+                missing.add(name)
+            return resolved
+        return re.sub(r"\$\{(\w+)\}", sub, value)
     if isinstance(value, list):
-        return [_expand_env(v) for v in value]
+        return [_expand_env(v, missing) for v in value]
     if isinstance(value, dict):
-        return {k: _expand_env(v) for k, v in value.items()}
+        return {k: _expand_env(v, missing) for k, v in value.items()}
     return value
 
 
@@ -189,7 +199,10 @@ def load_config(path: Path) -> dict:
                      "       run: pip install pyyaml")
     if not isinstance(data, dict):
         sys.exit("error: config must be a mapping")
-    return _expand_env(data)
+    missing: set[str] = set()
+    expanded = _expand_env(data, missing)
+    expanded["unset_env"] = sorted(missing)
+    return expanded
 
 
 # What each delivery channel needs before it can send anything.
@@ -227,7 +240,17 @@ def validate_config(config: dict) -> None:
         missing = [f"{sect}.{key}" for sect, key in CHANNEL_REQUIREMENTS[name]
                    if not str((config.get(sect) or {}).get(key) or "").strip()]
         if missing:
-            sys.exit(f"error: notify_via '{name}' needs {', '.join(missing)} in config.yaml")
+            hint = ""
+            unset = config.get("unset_env") or []
+            if unset:
+                # The field is blank because a secret never arrived, which is a
+                # different fix from "you forgot to fill in the config".
+                hint = ("\n       these config values read unset environment "
+                        f"variables: {', '.join(unset)}"
+                        "\n       in CI, add them as repository secrets "
+                        "(Settings > Secrets and variables > Actions)")
+            sys.exit(f"error: notify_via '{name}' needs {', '.join(missing)} "
+                     f"in config.yaml{hint}")
 
 
 def compile_rules(config: dict) -> list[dict]:
@@ -1150,6 +1173,21 @@ def self_test() -> int:
     # Accent-insensitive rules
     ac = compile_rules({"rules": [{"name": "fone", "any": ["fone de ouvido"]}]})
     check("accent rule", len(match_rules("FONE DE OUVIDO em promoção", ac)), 1)
+
+    # ${VAR} expansion, and naming the vars that resolved to nothing.
+    os.environ["_PROMO_TEST_VAR"] = "resolved"
+    os.environ.pop("_PROMO_TEST_ABSENT", None)
+    seen_missing: set = set()
+    got = _expand_env({"a": "${_PROMO_TEST_VAR}",
+                       "b": {"c": "${_PROMO_TEST_ABSENT}"},
+                       "d": ["${_PROMO_TEST_VAR}", "literal"],
+                       "e": 42}, seen_missing)
+    check("env expands", got["a"], "resolved")
+    check("env expands nested", got["b"]["c"], "")
+    check("env expands in lists", got["d"], ["resolved", "literal"])
+    check("env leaves non-strings", got["e"], 42)
+    check("env names what is unset", sorted(seen_missing), ["_PROMO_TEST_ABSENT"])
+    del os.environ["_PROMO_TEST_VAR"]
 
     # contains + discount gates
     dr = compile_rules({"rules": [

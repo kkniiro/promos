@@ -25,13 +25,14 @@ telegram:
 #   3. done -- tapping a notification opens the promo in Telegram
 #
 # The topic name is the ONLY thing keeping strangers out of it on the public
-# server, which is why it is long and random. Do not shorten it. If this repo
-# is public, move it to a ${NTFY_TOPIC} secret instead.
+# server: anyone who knows it can read your alerts or push junk to your phone.
+# This repo is public, so the topic lives in the NTFY_TOPIC repository secret
+# rather than in this file. Keep it long and random.
 # ---------------------------------------------------------------------------
 notify_via: ntfy
 
 ntfy:
-  topic: "lapromo-rtu6x3uoie2xncx"
+  topic: ${NTFY_TOPIC}
   # 5 = max urgency (bypasses some Do Not Disturb), 4 = high, 3 = default
   priority: 4
   # Only if you self-host ntfy, or use an access token on ntfy.sh:
