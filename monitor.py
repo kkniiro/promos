@@ -67,9 +67,15 @@ def contains_term(haystack: str, term: str) -> bool:
     return re.search(pattern, haystack) is not None
 
 
-# Brazilian and plain formats: R$ 1.234,56 / R$1234.56 / 1.234,56 reais
+# A number only counts as a price when a currency marker sits next to it --
+# otherwise "iPhone 15" or "50% off" would read as an amount.
+# Handles symbol-first (R$ 1.234,56 / €99,90 / $1,234.56) and symbol-last
+# (99,90 € / 149,90 reais / 20 euros).
+_CUR_BEFORE = r"r\$|us\$|au\$|ca\$|\$|€|£|brl|usd|eur|gbp"
+_CUR_AFTER = r"€|£|\$|reais?|real|euros?|dolares|dollars?|pounds?|conto"
 _PRICE_RE = re.compile(
-    r"(?:r\$|rs|brl)\s*([0-9][0-9.,\s]*)|([0-9][0-9.,]*)\s*(?:reais|conto)",
+    rf"(?:{_CUR_BEFORE})\s*([0-9][0-9.,\s]*[0-9]|[0-9])"
+    rf"|([0-9][0-9.,]*)\s*(?:{_CUR_AFTER})(?![a-z])",
     re.IGNORECASE,
 )
 
@@ -137,6 +143,20 @@ def load_config(path: Path) -> dict:
     if not isinstance(data, dict):
         sys.exit("error: config must be a mapping")
     return _expand_env(data)
+
+
+def validate_config(config: dict) -> None:
+    """Catch combinations that cannot work before we hit the network."""
+    source = (config.get("source") or "user").lower()
+    via = (config.get("notify_via") or "bot").lower()
+    if via == "saved" and source != "user":
+        sys.exit("error: notify_via 'saved' reuses the account session from source 'user',\n"
+                 f"       but source is '{source}'. Use notify_via: bot (a bot you never\n"
+                 "       have to add to the group), or switch source to 'user'.")
+    if via not in ("bot", "saved"):
+        sys.exit(f"error: unknown notify_via '{via}' (expected 'bot' or 'saved')")
+    if source == "web" and not (config.get("telegram", {}).get("channel") or "").strip():
+        sys.exit("error: source 'web' needs telegram.channel (the public @name, without the @)")
 
 
 def compile_rules(config: dict) -> list[dict]:
@@ -508,7 +528,8 @@ def send_saved_messages(config: dict, texts: list[str]) -> int:
 def deliver(config: dict, hits: list[dict]) -> int:
     """Send every match through whichever channel is configured."""
     via = (config.get("notify_via") or "bot").lower()
-    bodies = [format_alert(h) for h in hits]
+    bodies = [format_alert(h, config.get("currency_symbol", "R$"),
+                          config.get("currency_style", "eu")) for h in hits]
     if via == "saved":
         return send_saved_messages(config, bodies)
     sent = 0
@@ -519,12 +540,20 @@ def deliver(config: dict, hits: list[dict]) -> int:
     return sent
 
 
+def money(value: float, symbol: str = "R$", style: str = "eu") -> str:
+    """Format 4299.9 as 'R$ 4.299,90' (eu) or '$ 4,299.90' (us)."""
+    formatted = f"{value:,.2f}"
+    if style == "eu":   # swap separators: 4,299.90 -> 4.299,90
+        formatted = formatted.replace(",", "@").replace(".", ",").replace("@", ".")
+    return f"{symbol} {formatted}"
+
+
+# Kept so existing callers and tests keep working.
 def brl(value: float) -> str:
-    """Format 4299.9 as 'R$ 4.299,90' -- thousands dot, decimal comma."""
-    return "R$ " + f"{value:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    return money(value)
 
 
-def format_alert(hit: dict) -> str:
+def format_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> str:
     def esc(s):
         return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -537,7 +566,7 @@ def format_alert(hit: dict) -> str:
     lines = [f"🔔 <b>{esc(rules)}</b>"]
     price = next((h["price"] for h in hit["matches"] if h["price"] is not None), None)
     if price is not None:
-        lines.append(f"💰 {brl(price)}")
+        lines.append(f"💰 {money(price, symbol, style)}")
     lines.append("")
     lines.append(esc(body))
     if hit.get("link"):
@@ -553,7 +582,10 @@ def format_alert(hit: dict) -> str:
 # --------------------------------------------------------------------------
 
 def run_poll(config: dict, args) -> int:
+    validate_config(config)
     rules = compile_rules(config)
+    symbol = config.get("currency_symbol", "R$")
+    style = config.get("currency_style", "eu")
     state_path = Path(args.state) if args.state else DEFAULT_STATE
     state = {} if args.replay else load_state(state_path)
     seen = state.get("seen", {}) if not args.replay else {}
@@ -623,7 +655,8 @@ def run_poll(config: dict, args) -> int:
         print(f"checked {considered} message(s) -- {len(hits)} match(es)"
               + (f", {skipped_old} skipped as older than {max_age}h" if skipped_old else ""))
         for m in summary["matches"]:
-            price = f"  [{brl(m['price'])}]" if m["price"] is not None else ""
+            price = (f"  [{money(m['price'], symbol, style)}]"
+                     if m["price"] is not None else "")
             print(f"\n- {m['rule']}{price}\n  terms: {', '.join(m['terms'])}")
             print("  " + m["text"].replace("\n", "\n  ")[:300])
             if m["link"]:
@@ -658,6 +691,22 @@ def self_test() -> int:
     check("price thousands", extract_prices("R$ 3.499"), [3499.0])
     check("price reais suffix", extract_prices("sai por 149,90 reais"), [149.90])
     check("price none", extract_prices("frete gratis hoje"), [])
+
+    # Other currencies -- the channel may not price in BRL.
+    check("price eur symbol", extract_prices("seulement 29,99€"), [29.99])
+    check("price eur before", extract_prices("€ 1.499,00"), [1499.0])
+    check("price usd", extract_prices("only $1,234.56"), [1234.56])
+    check("price gbp", extract_prices("£99.99 today"), [99.99])
+    check("price word eur", extract_prices("a 20 euros"), [20.0])
+    check("price cheapest wins", extract_prices("de 199€ por 99€"), [99.0, 199.0])
+    # A bare number or a percentage must never read as a price.
+    check("no bare number", extract_prices("iPhone 15 Pro Max 256"), [])
+    check("no percentage", extract_prices("50% de desconto"), [])
+    check("no word glued", extract_prices("123 realmente barato"), [])
+
+    check("money eu", money(4299.9, "R$", "eu"), "R$ 4.299,90")
+    check("money us", money(4299.9, "$", "us"), "$ 4,299.90")
+    check("money eur", money(29.99, "€", "eu"), "€ 29,99")
 
     rules = compile_rules({"rules": [
         {"name": "cheap iphone", "any": ["iphone"], "none": ["capinha"], "max_price": 5000},
@@ -728,7 +777,15 @@ def main() -> int:
         return self_test()
 
     config = load_config(Path(args.config))
-    return run_poll(config, args)
+    try:
+        return run_poll(config, args)
+    except BrokenPipeError:
+        # Someone piped us into `head`; that is not an error worth a traceback.
+        try:
+            sys.stdout.close()
+        except BrokenPipeError:
+            pass
+        return 0
 
 
 if __name__ == "__main__":

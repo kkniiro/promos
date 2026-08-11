@@ -1,48 +1,28 @@
 # ---------------------------------------------------------------------------
-# What to watch, and what counts as interesting.
-# Copy to config.yaml and edit. No credentials belong in this file -- the
-# ${...} references are resolved from environment variables / GitHub secrets.
+# Watching https://t.me/s/LaPromotion
+#
+# It is a PUBLIC CHANNEL, so reading it needs no credentials at all -- no bot
+# in the group, no account session, no api keys. Just an HTTP GET.
+#
+# The only credentials here are for DELIVERING the alert to your phone.
 # ---------------------------------------------------------------------------
 
-# How to read the group:
-#   user -> through YOUR OWN account. The only option for a group you do not
-#           administer, since adding a bot needs admin rights.
-#   web  -> scrape https://t.me/s/<channel>. PUBLIC CHANNELS only, zero
-#           credentials. Use this if you can -- it is by far the simplest.
-#   bot  -> a bot you added to the group. Needs admin rights on the group.
-source: user
+source: web
 
 telegram:
-  # --- source: user ---------------------------------------------------------
-  # From https://my.telegram.org > API development tools.
-  api_id: ${TELEGRAM_API_ID}
-  api_hash: ${TELEGRAM_API_HASH}
-  # Generated once by tools/login.py. As sensitive as your password.
-  session: ${TELEGRAM_SESSION}
+  channel: "LaPromotion"
 
-  # The group to watch. tools/login.py lists every group you are in with its id.
-  # Usually a negative number like -1001234567890.
-  chat_id: ""
-
-  # --- source: web ----------------------------------------------------------
-  # The public @name, without the @.
-  channel: ""
-
-  # --- delivery -------------------------------------------------------------
-  # Only needed when notify_via is "bot".
+  # Delivery: a bot that DMs you. You never add it to the channel -- it only
+  # ever messages you. @BotFather > /newbot, then DM the bot once and run
+  # `python3 tools/whoami.py` to get your notify_chat_id.
   bot_token: ${TELEGRAM_BOT_TOKEN}
   notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
 
-# Where alerts land on your phone:
-#   saved -> your own Telegram "Saved Messages". No bot needed at all.
-#            Requires source: user (it reuses the same session).
-#   bot   -> a DM from your own bot. A separate chat, so alerts do not mix in
-#            with notes you save yourself. Create the bot with @BotFather and
-#            send it one message -- you do NOT need to add it to any group.
-notify_via: saved
+notify_via: bot
 
-# How many recent messages to pull per poll (source: user).
-fetch_limit: 60
+# Prices are read in any common currency, but thresholds below are in R$.
+currency_symbol: "R$"
+currency_style: eu        # 1.234,56  (use "us" for 1,234.56)
 
 # If state is ever lost, ignore anything older than this so you do not get a
 # flood of stale promos. Set 0 to disable the guard.
@@ -52,17 +32,20 @@ max_age_hours: 24
 retain_days: 14
 
 # ---------------------------------------------------------------------------
-# Rules. A message alerts if it satisfies ANY rule.
-# Within a rule:
+# RULES -- replace these with what you actually want.
+# A message alerts if it satisfies ANY rule.
 #   any       -> at least one of these must appear   (optional if `all` is set)
 #   all       -> every one of these must appear      (optional if `any` is set)
 #   none      -> if any of these appear, skip it
-#   max_price -> only alert if the cheapest price found is <= this
+#   max_price -> only alert if the cheapest price found is <= this (in R$)
 #   min_price -> only alert if the cheapest price found is >= this
 #
-# Matching ignores case and accents, so "promocao" matches "Promoção".
-# Terms will not match mid-word: "tv" hits "TV" and "TVs" but not "netvibes".
-# NOTE: a price gate means messages with NO price are skipped by that rule.
+# Case and accents are ignored ("promocao" matches "Promoção").
+# Terms never match mid-word ("tv" hits "TVs" but not "netvibes").
+# A price gate SKIPS messages that quote no price at all.
+#
+# Try changes safely, without touching the network or your state:
+#   python3 monitor.py --replay fixtures/sample_messages.json --format text
 # ---------------------------------------------------------------------------
 rules:
   - name: "iPhone"
