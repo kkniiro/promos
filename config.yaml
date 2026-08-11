@@ -85,3 +85,21 @@ rules:
     any: ["iphone"]
     # Accessories are not iPhone deals. Delete this line to catch them too.
     none: ["capinha", "capa", "pelicula", "cabo", "carregador", "suporte"]
+
+  - name: "GoPro"
+    any: ["gopro", "go pro", "go-pro"]
+
+  - name: "Grátis"
+    any: ["gratis", "gratuito", "de graca", "free", "brinde", "cupom 100%"]
+
+  # Fires on any message advertising 50% off or more. Reads an explicit
+  # percentage ("70% OFF") or infers one from a "de R$ 200 por R$ 50" pair.
+  # Messages that state no discount at all are skipped.
+  - name: "50%+ off"
+    min_discount: 50
+
+  # "contains" matches anywhere in a word, unlike the other lists -- so this
+  # also catches "bugado", "bugou" and "bugzeira". That is the point for
+  # price-glitch posts, but it is looser: "bugiganga" would match too.
+  - name: "Bug"
+    contains: ["bug"]

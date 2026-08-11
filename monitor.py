@@ -54,17 +54,25 @@ def normalize(text: str) -> str:
 
 
 def contains_term(haystack: str, term: str) -> bool:
-    """Substring match that will not fire mid-word.
+    """Whole-word match that still tolerates a plural.
 
     'tv' matches 'tv' and 'tvs' but not 'netvibes'; 'ps5' matches 'ps5!' but
-    not 'wps5000'. Both sides are already normalised by the caller.
+    not 'wps5000'; 'capa' matches 'capa' and 'capas' but NOT 'capacidade' or
+    'capacete'. Guarding only the left side would let a short term swallow any
+    longer word starting with it, which silently drops real matches when the
+    term is used as an exclusion. Both sides are normalised by the caller.
     """
     term = term.strip()
     if not term:
         return False
-    # A term with its own spaces/punctuation is matched literally.
-    pattern = r"(?<![0-9a-z])" + re.escape(term)
+    pattern = r"(?<![0-9a-z])" + re.escape(term) + r"(?:es|s)?(?![0-9a-z])"
     return re.search(pattern, haystack) is not None
+
+
+def contains_loose(haystack: str, term: str) -> bool:
+    """Raw substring match, anywhere -- 'bug' also hits 'bugado' and 'bugou'."""
+    term = term.strip()
+    return bool(term) and term in haystack
 
 
 # A number only counts as a price when a currency marker sits next to it --
@@ -102,14 +110,53 @@ def _to_float(raw: str) -> float | None:
         return None
 
 
-def extract_prices(text: str) -> list[float]:
-    """Every currency-looking number in the message, cheapest first."""
+_PCT_RE = re.compile(r"(\d{1,3})\s*(?:%|por\s*cento|porcento)")
+# "de R$ 199 por R$ 99" -- a discount stated as two prices rather than a %.
+_FROM_TO_RE = re.compile(r"\bde\b.{0,60}?\bpor\b", re.DOTALL)
+
+
+def extract_discounts(text: str) -> list[int]:
+    """Explicit discount percentages written in the message."""
+    out = []
+    for m in _PCT_RE.finditer(text or ""):
+        pct = int(m.group(1))
+        if 0 < pct <= 100:
+            out.append(pct)
+    return sorted(out)
+
+
+def implied_discount(text: str) -> int | None:
+    """Discount inferred from a 'de X por Y' price pair, if one is present.
+
+    Requires the de/por wording so two unrelated prices in the same message
+    are not read as a markdown.
+    """
+    if not _FROM_TO_RE.search(normalize(text or "")):
+        return None
+    # Order matters here, not magnitude: "de X por Y" means X came first.
+    # Sorting would read "de R$ 50 por R$ 200" (a rise) as a 75% cut.
+    ordered = _prices_in_order(text)
+    if len(ordered) < 2:
+        return None
+    was, now = ordered[0], ordered[1]
+    if was <= 0 or now >= was:
+        return None
+    return int(round((was - now) / was * 100))
+
+
+def _prices_in_order(text: str) -> list[float]:
+    """Every currency-looking number, in the order it appears in the text."""
     found: list[float] = []
     for m in _PRICE_RE.finditer(text or ""):
         value = _to_float(m.group(1) or m.group(2) or "")
         if value is not None and 0 < value < 10_000_000:
             found.append(value)
-    return sorted(found)
+    return found
+
+
+def extract_prices(text: str) -> list[float]:
+    """Every currency-looking number in the message, cheapest first."""
+    return sorted(_prices_in_order(text))
 
 
 # --------------------------------------------------------------------------
@@ -193,11 +240,16 @@ def compile_rules(config: dict) -> list[dict]:
             "any": [normalize(t) for t in (raw.get("any") or []) if str(t).strip()],
             "all": [normalize(t) for t in (raw.get("all") or []) if str(t).strip()],
             "none": [normalize(t) for t in (raw.get("none") or []) if str(t).strip()],
+            "contains": [normalize(t) for t in (raw.get("contains") or []) if str(t).strip()],
             "max_price": raw.get("max_price"),
             "min_price": raw.get("min_price"),
+            "min_discount": raw.get("min_discount"),
+            "max_discount": raw.get("max_discount"),
         }
-        if not (rule["any"] or rule["all"]):
-            sys.exit(f"error: rule '{rule['name']}' needs at least one 'any' or 'all' keyword")
+        if not (rule["any"] or rule["all"] or rule["contains"]
+                or rule["min_discount"] is not None):
+            sys.exit(f"error: rule '{rule['name']}' needs at least one of "
+                     "'any', 'all', 'contains' or 'min_discount'")
         rules.append(rule)
     if not rules:
         sys.exit("error: config has no rules -- nothing to watch for")
@@ -211,6 +263,8 @@ def match_rules(text: str, rules: list[dict]) -> list[dict]:
         return []
     prices = extract_prices(text)
     cheapest = prices[0] if prices else None
+    percentages = extract_discounts(text)
+    best_discount = max(percentages) if percentages else implied_discount(text)
     hits = []
 
     for rule in rules:
@@ -220,7 +274,10 @@ def match_rules(text: str, rules: list[dict]) -> list[dict]:
         if len(matched_all) != len(rule["all"]):
             continue
         matched_any = [t for t in rule["any"] if contains_term(hay, t)]
-        if rule["any"] and not matched_any:
+        matched_loose = [t for t in rule["contains"] if contains_loose(hay, t)]
+        # `any` and `contains` are two ways of spelling the same "at least one
+        # of these" test, so they pool together.
+        if (rule["any"] or rule["contains"]) and not (matched_any or matched_loose):
             continue
 
         # Price gates only apply when the message actually quotes a price.
@@ -231,10 +288,19 @@ def match_rules(text: str, rules: list[dict]) -> list[dict]:
             if cheapest is None or cheapest < float(rule["min_price"]):
                 continue
 
+        # Same for discount gates: no stated discount means no match.
+        if rule["min_discount"] is not None:
+            if best_discount is None or best_discount < int(rule["min_discount"]):
+                continue
+        if rule["max_discount"] is not None:
+            if best_discount is None or best_discount > int(rule["max_discount"]):
+                continue
+
         hits.append({
             "rule": rule["name"],
-            "terms": sorted(set(matched_any + matched_all)),
+            "terms": sorted(set(matched_any + matched_all + matched_loose)),
             "price": cheapest,
+            "discount": best_discount,
         })
     return hits
 
@@ -550,12 +616,21 @@ def build_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> dict:
     rules = ", ".join(sorted({h["rule"] for h in hit["matches"]}))
     terms = sorted({t for h in hit["matches"] for t in h["terms"]})
     price = next((h["price"] for h in hit["matches"] if h["price"] is not None), None)
+    discount = next((h.get("discount") for h in hit["matches"]
+                     if h.get("discount") is not None), None)
     body = hit["text"].strip()
     if len(body) > 900:
         body = body[:900].rstrip() + "..."
-    title = rules if price is None else f"{rules} - {money(price, symbol, style)}"
+
+    bits = [rules]
+    if price is not None:
+        bits.append(money(price, symbol, style))
+    if discount is not None:
+        bits.append(f"-{discount}%")
+    title = " · ".join(bits)
     return {"title": title, "rules": rules, "terms": terms, "price": price,
-            "body": body, "url": hit.get("link"), "chat": hit.get("chat")}
+            "discount": discount, "body": body, "url": hit.get("link"),
+            "chat": hit.get("chat")}
 
 
 def notify_ntfy(config: dict, alerts: list[dict]) -> int:
@@ -819,6 +894,8 @@ def run_poll(config: dict, args) -> int:
             {"rule": ", ".join(sorted({m["rule"] for m in h["matches"]})),
              "terms": sorted({t for m in h["matches"] for t in m["terms"]}),
              "price": next((m["price"] for m in h["matches"] if m["price"] is not None), None),
+             "discount": next((m.get("discount") for m in h["matches"]
+                               if m.get("discount") is not None), None),
              "text": h["text"][:400],
              "link": h.get("link"),
              "chat": h.get("chat")}
@@ -830,9 +907,15 @@ def run_poll(config: dict, args) -> int:
         print(f"checked {considered} message(s) -- {len(hits)} match(es)"
               + (f", {skipped_old} skipped as older than {max_age}h" if skipped_old else ""))
         for m in summary["matches"]:
-            price = (f"  [{money(m['price'], symbol, style)}]"
-                     if m["price"] is not None else "")
-            print(f"\n- {m['rule']}{price}\n  terms: {', '.join(m['terms'])}")
+            tags = []
+            if m["price"] is not None:
+                tags.append(money(m["price"], symbol, style))
+            if m.get("discount") is not None:
+                tags.append(f"-{m['discount']}%")
+            label = f"  [{' · '.join(tags)}]" if tags else ""
+            print(f"\n- {m['rule']}{label}")
+            if m["terms"]:            # discount-only rules match no keywords
+                print(f"  terms: {', '.join(m['terms'])}")
             print("  " + m["text"].replace("\n", "\n  ")[:300])
             if m["link"]:
                 print(f"  {m['link']}")
@@ -859,6 +942,27 @@ def self_test() -> int:
     check("word-guard plural", contains_term("smart tvs on sale", "tv"), True)
     check("word-guard punctuation", contains_term("ps5 slim!", "ps5"), True)
     check("word-guard prefix digits", contains_term("wps5000 router", "ps5"), False)
+    # Guarding only the left side let a short term swallow any longer word
+    # starting with it -- which silently killed real matches via exclusions.
+    check("word-guard capa/capacidade", contains_term("iphone 256gb capacidade", "capa"), False)
+    check("word-guard capa/capacete", contains_term("capacete de moto", "capa"), False)
+    check("word-guard capa/capas", contains_term("duas capas novas", "capa"), True)
+    check("word-guard free/freezer", contains_term("freezer novo", "free"), False)
+    check("word-guard free alone", contains_term("brinde free hoje", "free"), True)
+    check("word-guard plural es", contains_term("promocoes do dia", "promocao"), False)
+    check("word-guard camera plural", contains_term("cameras gopro", "camera"), True)
+
+    check("loose matches inside word", contains_loose("produto bugado", "bug"), True)
+    check("loose matches exact", contains_loose("bug de preco", "bug"), True)
+    check("loose absent", contains_loose("promocao boa", "bug"), False)
+
+    check("pct explicit", extract_discounts("50% OFF hoje"), [50])
+    check("pct multiple", extract_discounts("de 20% ate 70% off"), [20, 70])
+    check("pct words", extract_discounts("80 por cento de desconto"), [80])
+    check("pct over 100 ignored", extract_discounts("120% de aumento"), [])
+    check("pct implied", implied_discount("de R$ 200,00 por R$ 50,00"), 75)
+    check("pct implied needs marker", implied_discount("R$ 200,00 R$ 50,00"), None)
+    check("pct implied needs drop", implied_discount("de R$ 50,00 por R$ 200,00"), None)
 
     check("price br", extract_prices("de R$ 1.234,56 por R$ 899,90"), [899.90, 1234.56])
     check("price us", extract_prices("R$1,234.56"), [1234.56])
@@ -899,6 +1003,26 @@ def self_test() -> int:
     # Accent-insensitive rules
     ac = compile_rules({"rules": [{"name": "fone", "any": ["fone de ouvido"]}]})
     check("accent rule", len(match_rules("FONE DE OUVIDO em promoção", ac)), 1)
+
+    # contains + discount gates
+    dr = compile_rules({"rules": [
+        {"name": "bug", "contains": ["bug"]},
+        {"name": "big sale", "min_discount": 50},
+        {"name": "gopro", "any": ["gopro", "go pro"]},
+    ]})
+    check("contains fires mid-word",
+          [h["rule"] for h in match_rules("Produto bugado na Amazon", dr)], ["bug"])
+    check("discount explicit",
+          [h["rule"] for h in match_rules("70% OFF em tudo", dr)], ["big sale"])
+    check("discount below floor", match_rules("20% OFF em tudo", dr), [])
+    check("discount implied",
+          [h["rule"] for h in match_rules("de R$ 400,00 por R$ 100,00", dr)], ["big sale"])
+    check("discount reported", match_rules("70% OFF", dr)[0]["discount"], 70)
+    check("no discount stated", match_rules("Camisa por R$ 50,00", dr), [])
+    check("gopro one word", [h["rule"] for h in match_rules("GoPro Hero 12", dr)], ["gopro"])
+    check("gopro two words", [h["rule"] for h in match_rules("Go Pro Hero 12", dr)], ["gopro"])
+    # A rule may gate purely on discount, with no keywords at all.
+    check("discount-only rule compiles", len(dr), 3)
 
     # HTML parsing against a realistic t.me/s/ fragment
     sample = """
