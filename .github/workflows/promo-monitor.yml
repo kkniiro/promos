@@ -15,6 +15,7 @@ on:
           - poll          # normal run: check for matches and notify
           - dry-run       # show matches, notify nothing, save nothing
           - test-alert    # send one fake alert to check delivery works
+          - dump          # print every message read, to check the reader works
 
 # Never let two runs race on the state.
 concurrency:
@@ -73,6 +74,7 @@ jobs:
         run: |
           case "${{ inputs.mode || 'poll' }}" in
             test-alert) python3 monitor.py --test-alert ;;
+            dump)       python3 monitor.py --dump --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
             dry-run)    python3 monitor.py --format text --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
             *)          python3 monitor.py --format text --notify --github-output | tee -a "$GITHUB_STEP_SUMMARY" ;;
           esac

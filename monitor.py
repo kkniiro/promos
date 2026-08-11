@@ -854,6 +854,19 @@ def run_poll(config: dict, args) -> int:
         else:
             sys.exit(f"error: unknown source '{source}' (expected 'user', 'bot', or 'web')")
 
+    if args.dump:
+        # Diagnostic: tells "nothing matched" apart from "nothing was read".
+        print(f"fetched {len(messages)} message(s) from "
+              f"{config.get('telegram', {}).get('channel') or config.get('source')}\n")
+        for m in messages:
+            when = (datetime.fromtimestamp(m["ts"], timezone.utc).isoformat(timespec="minutes")
+                    if m.get("ts") else "no timestamp")
+            snippet = " ".join((m.get("text") or "").split())[:160]
+            hits = match_rules(m.get("text") or "", rules)
+            flag = "MATCH " + ",".join(h["rule"] for h in hits) if hits else "-"
+            print(f"[{when}] {flag}\n  {snippet}\n")
+        return 0
+
     # Guard rail: if state was lost, do not replay days of backlog to the phone.
     max_age = int(config.get("max_age_hours", 24))
     floor = time.time() - max_age * 3600 if max_age > 0 else 0
@@ -1071,6 +1084,8 @@ def main() -> int:
     ap.add_argument("--self-test", action="store_true", help="offline sanity checks")
     ap.add_argument("--test-alert", action="store_true",
                     help="send one fake alert to confirm delivery is wired up")
+    ap.add_argument("--dump", action="store_true",
+                    help="print what was actually fetched, to check the reader works")
     ap.add_argument("--github-output", action="store_true", help="emit match_count for Actions")
     args = ap.parse_args()
 
