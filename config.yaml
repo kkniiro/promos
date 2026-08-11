@@ -60,21 +60,28 @@ retain_days: 14
 # Try changes safely, without touching the network or your state:
 #   python3 monitor.py --replay fixtures/sample_messages.json --format text
 # ---------------------------------------------------------------------------
+#
+# No max_price on any rule, deliberately: a price gate also throws away every
+# message that quotes no price, which silently loses matches. Add one only
+# where you know the promos always show a number, e.g.
+#     max_price: 6000
+#
 rules:
+  - name: "Hollyland"
+    any: ["hollyland"]
+
+  - name: "Lapela"
+    # "lavalier" is the same product under its English name.
+    any: ["lapela", "lavalier"]
+
+  - name: "Drone"
+    any: ["drone"]
+
+  - name: "Câmera"
+    # Accents are ignored, so this also catches "camera" typed without one.
+    any: ["camera"]
+
   - name: "iPhone"
-    any: ["iphone", "apple"]
-    none: ["capinha", "capa", "pelicula", "carregador", "cabo", "fone"]
-    max_price: 5000
-
-  - name: "Smart TV 55+"
-    all: ["tv"]
-    any: ["55", "65", "75"]
-    none: ["suporte", "rack"]
-    max_price: 3000
-
-  - name: "Videogame"
-    any: ["playstation", "ps5", "xbox", "nintendo switch"]
-    none: ["jogo", "game pass", "controle", "assinatura"]
-
-  - name: "Anything free"
-    any: ["gratis", "de graca", "freebie", "cupom 100%"]
+    any: ["iphone"]
+    # Accessories are not iPhone deals. Delete this line to catch them too.
+    none: ["capinha", "capa", "pelicula", "cabo", "carregador", "suporte"]
