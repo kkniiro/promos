@@ -1,28 +1,74 @@
 # ---------------------------------------------------------------------------
 # What to watch, and what counts as interesting.
-# Copy to config.yaml and edit. Never put your bot token in here -- keep it in
-# ${TELEGRAM_BOT_TOKEN} and set that as a GitHub secret.
+# Copy to config.yaml and edit. No credentials belong in this file -- the
+# ${...} references are resolved from environment variables / GitHub secrets.
 # ---------------------------------------------------------------------------
 
-# "bot" -> read a group your bot was added to (works for PRIVATE groups)
-# "web" -> scrape https://t.me/s/<channel> (PUBLIC channels only, no token)
-source: bot
+# How to read the group:
+#   user -> through YOUR OWN account. The only option for a group you do not
+#           administer, since adding a bot needs admin rights.
+#   web  -> scrape https://t.me/s/<channel>. PUBLIC CHANNELS only, zero
+#           credentials. Use this if you can -- it is by far the simplest.
+#   bot  -> a bot you added to the group. Needs admin rights on the group.
+source: user
 
 telegram:
-  bot_token: ${TELEGRAM_BOT_TOKEN}
+  # --- source: user ---------------------------------------------------------
+  # From https://my.telegram.org > API development tools.
+  api_id: ${TELEGRAM_API_ID}
+  api_hash: ${TELEGRAM_API_HASH}
+  # Generated once by tools/login.py. As sensitive as your password.
+  session: ${TELEGRAM_SESSION}
 
-  # Only used when source: bot
-  # Leave empty to accept every chat the bot can see. Fill it in once you know
-  # the group id (run `python3 tools/whoami.py` to discover it) so a second
-  # group added later cannot start spamming you.
+  # The group to watch. tools/login.py lists every group you are in with its id.
+  # Usually a negative number like -1001234567890.
   chat_id: ""
 
-  # Only used when source: web -- the public @name, without the @
+  # --- source: web ----------------------------------------------------------
+  # The public @name, without the @.
   channel: ""
 
-  # Where alerts get delivered. Your personal chat id with the bot -- this is
-  # what makes your phone buzz. `tools/whoami.py` prints it.
+  # --- delivery -------------------------------------------------------------
+  # Only needed when notify_via is "bot".
+  bot_token: ${TELEGRAM_BOT_TOKEN}
   notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
+
+# Where alerts land on your phone. Takes one name or a list.
+#   ntfy     -> ntfy.sh, a free push app. No account, no signup. BEST CHOICE if
+#               your Telegram is muted, since it is a separate app you can leave
+#               loud without unmuting a hundred groups.
+#   pushover -> Pushover. More polished, $5 one-time.
+#   discord  -> a Discord webhook (per-server mute is independent of Telegram).
+#   webhook  -> generic JSON POST: Slack, Zapier, Home Assistant, your own app.
+#   bot      -> a DM from your own Telegram bot. You do NOT need to add it to
+#               any group -- it only ever messages you.
+#   saved    -> your own Telegram "Saved Messages". Requires source: user.
+#
+# Verify whichever you pick with:  python3 monitor.py --test-alert
+notify_via: ntfy
+
+ntfy:
+  # Anyone who knows this topic can read your alerts on the public server,
+  # so make it long and random. `python3 -c "import secrets;
+  # print(secrets.token_urlsafe(12))"` is a good source.
+  topic: ""
+  priority: 4        # 5 = max urgency, 4 = high, 3 = default
+  # server: "https://ntfy.sh"     # change only if self-hosting
+  # token: ${NTFY_TOKEN}          # only for protected topics
+
+pushover:
+  token: ${PUSHOVER_TOKEN}
+  user_key: ${PUSHOVER_USER_KEY}
+
+discord:
+  webhook_url: ${DISCORD_WEBHOOK_URL}
+
+webhook:
+  url: ${WEBHOOK_URL}
+  headers: {}
+
+# How many recent messages to pull per poll (source: user).
+fetch_limit: 60
 
 # If state is ever lost, ignore anything older than this so you do not get a
 # flood of stale promos. Set 0 to disable the guard.

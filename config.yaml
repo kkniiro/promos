@@ -1,28 +1,46 @@
 # ---------------------------------------------------------------------------
-# What to watch, and what counts as interesting.
-# Copy to config.yaml and edit. Never put your bot token in here -- keep it in
-# ${TELEGRAM_BOT_TOKEN} and set that as a GitHub secret.
+# Watching public Telegram channels. Reading them needs no credentials at all
+# -- no bot in the group, no account session, no api keys. Just an HTTP GET.
+#
+# Add more by appending to the list. If one channel goes private or is
+# renamed, the others are still checked and a warning names the broken one.
+# The same promo cross-posted to both only alerts once, because messages are
+# de-duplicated on their text rather than per channel.
 # ---------------------------------------------------------------------------
 
-# "bot" -> read a group your bot was added to (works for PRIVATE groups)
-# "web" -> scrape https://t.me/s/<channel> (PUBLIC channels only, no token)
-source: bot
+source: web
 
 telegram:
-  bot_token: ${TELEGRAM_BOT_TOKEN}
+  channels:
+    - "LaPromotion"      # https://t.me/s/LaPromotion
+    - "lobaopromo"       # https://t.me/s/lobaopromo
 
-  # Only used when source: bot
-  # Leave empty to accept every chat the bot can see. Fill it in once you know
-  # the group id (run `python3 tools/whoami.py` to discover it) so a second
-  # group added later cannot start spamming you.
-  chat_id: ""
+# ---------------------------------------------------------------------------
+# DELIVERY -- ntfy.sh, a separate app whose only job is these alerts.
+# Your Telegram stays muted; this one app you leave loud.
+# Free, no account, no signup.
+#
+#   1. install "ntfy" (App Store / Play Store / F-Droid)
+#   2. Subscribe to topic -> paste the topic below
+#   3. done -- tapping a notification opens the promo in Telegram
+#
+# The topic name is the ONLY thing keeping strangers out of it on the public
+# server, which is why it is long and random. Do not shorten it. If this repo
+# is public, move it to a ${NTFY_TOPIC} secret instead.
+# ---------------------------------------------------------------------------
+notify_via: ntfy
 
-  # Only used when source: web -- the public @name, without the @
-  channel: ""
+ntfy:
+  topic: "lapromo-rtu6x3uoie2xncx"
+  # 5 = max urgency (bypasses some Do Not Disturb), 4 = high, 3 = default
+  priority: 4
+  # Only if you self-host ntfy, or use an access token on ntfy.sh:
+  # server: "https://ntfy.sh"
+  # token: ${NTFY_TOKEN}
 
-  # Where alerts get delivered. Your personal chat id with the bot -- this is
-  # what makes your phone buzz. `tools/whoami.py` prints it.
-  notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
+# Prices are read in any common currency; thresholds below are in R$.
+currency_symbol: "R$"
+currency_style: eu        # 1.234,56  (use "us" for 1,234.56)
 
 # If state is ever lost, ignore anything older than this so you do not get a
 # flood of stale promos. Set 0 to disable the guard.
@@ -32,33 +50,70 @@ max_age_hours: 24
 retain_days: 14
 
 # ---------------------------------------------------------------------------
-# Rules. A message alerts if it satisfies ANY rule.
-# Within a rule:
+# RULES -- replace these with what you actually want.
+# A message alerts if it satisfies ANY rule.
 #   any       -> at least one of these must appear   (optional if `all` is set)
 #   all       -> every one of these must appear      (optional if `any` is set)
 #   none      -> if any of these appear, skip it
-#   max_price -> only alert if the cheapest price found is <= this
+#   max_price -> only alert if the cheapest price found is <= this (in R$)
 #   min_price -> only alert if the cheapest price found is >= this
 #
-# Matching ignores case and accents, so "promocao" matches "Promoção".
-# Terms will not match mid-word: "tv" hits "TV" and "TVs" but not "netvibes".
-# NOTE: a price gate means messages with NO price are skipped by that rule.
+# Case and accents are ignored ("promocao" matches "Promoção").
+# Terms never match mid-word ("tv" hits "TVs" but not "netvibes").
+# A price gate SKIPS messages that quote no price at all.
+#
+# Try changes safely, without touching the network or your state:
+#   python3 monitor.py --replay fixtures/sample_messages.json --format text
 # ---------------------------------------------------------------------------
+#
+# No max_price on any rule, deliberately: a price gate also throws away every
+# message that quotes no price, which silently loses matches. Add one only
+# where you know the promos always show a number, e.g.
+#     max_price: 6000
+#
 rules:
+  - name: "Hollyland"
+    any: ["hollyland"]
+
+  - name: "Lapela"
+    # "lavalier" is the same product under its English name.
+    any: ["lapela", "lavalier"]
+
+  - name: "Drone"
+    any: ["drone"]
+
+  - name: "Câmera"
+    # Accents are ignored, so this also catches "camera" typed without one.
+    any: ["camera"]
+
   - name: "iPhone"
-    any: ["iphone", "apple"]
-    none: ["capinha", "capa", "pelicula", "carregador", "cabo", "fone"]
-    max_price: 5000
+    any: ["iphone"]
+    # Accessories are not iPhone deals. Delete this line to catch them too.
+    none: ["capinha", "capa", "pelicula", "cabo", "carregador", "suporte"]
 
-  - name: "Smart TV 55+"
-    all: ["tv"]
-    any: ["55", "65", "75"]
-    none: ["suporte", "rack"]
-    max_price: 3000
+  - name: "GoPro"
+    any: ["gopro", "go pro", "go-pro"]
 
-  - name: "Videogame"
-    any: ["playstation", "ps5", "xbox", "nintendo switch"]
-    none: ["jogo", "game pass", "controle", "assinatura"]
+  - name: "Monitor"
+    # Also matches "monitores". Excludes the mounting arms and cables.
+    any: ["monitor"]
+    none: ["suporte", "braco", "cabo"]
 
-  - name: "Anything free"
-    any: ["gratis", "de graca", "freebie", "cupom 100%"]
+  - name: "SSD"
+    # Also matches "SSDs". "nvme" and "m.2" are the same shelf.
+    any: ["ssd", "nvme"]
+
+  - name: "Grátis"
+    any: ["gratis", "gratuito", "de graca", "free", "brinde", "cupom 100%"]
+
+  # Fires on any message advertising 50% off or more. Reads an explicit
+  # percentage ("70% OFF") or infers one from a "de R$ 200 por R$ 50" pair.
+  # Messages that state no discount at all are skipped.
+  - name: "50%+ off"
+    min_discount: 50
+
+  # "contains" matches anywhere in a word, unlike the other lists -- so this
+  # also catches "bugado", "bugou" and "bugzeira". That is the point for
+  # price-glitch posts, but it is looser: "bugiganga" would match too.
+  - name: "Bug"
+    contains: ["bug"]

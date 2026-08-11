@@ -7,10 +7,15 @@ on:
     - cron: "*/10 * * * *"     # every 10 min; GitHub treats this as best-effort
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Check for matches but do not notify or save state"
-        type: boolean
-        default: false
+      mode:
+        description: "What to do"
+        type: choice
+        default: poll
+        options:
+          - poll          # normal run: check for matches and notify
+          - dry-run       # show matches, notify nothing, save nothing
+          - test-alert    # send one fake alert to check delivery works
+          - dump          # print every message read, to check the reader works
 
 # Never let two runs race on the state.
 concurrency:
@@ -30,7 +35,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install pyyaml
+      # telethon is only needed for source: user / notify_via: saved
+      - run: pip install pyyaml telethon
 
       - name: Sanity-check the matcher
         run: |
@@ -43,26 +49,38 @@ jobs:
       # Cache keys are immutable, so each run writes a new one and restores the
       # most recent via the shared prefix.
       - name: Restore seen-message state
+        if: ${{ inputs.mode != 'test-alert' }}
         uses: actions/cache/restore@v4
         with:
           path: state
           key: promo-state-${{ github.run_id }}
           restore-keys: promo-state-
 
-      - name: Poll the group
-        id: poll
+      - name: Run
         env:
+          # delivery
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_NOTIFY_CHAT_ID: ${{ secrets.TELEGRAM_NOTIFY_CHAT_ID }}
+          # reading a private group (source: user) -- unused for public channels
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
         run: |
-          python3 monitor.py \
-            --format text \
-            --github-output \
-            ${{ inputs.dry_run && '--dry-run' || '--notify' }} \
-            | tee "$GITHUB_STEP_SUMMARY"
+          case "${{ inputs.mode || 'poll' }}" in
+            test-alert) python3 monitor.py --test-alert ;;
+            dump)       python3 monitor.py --dump --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            dry-run)    python3 monitor.py --format text --dry-run | tee -a "$GITHUB_STEP_SUMMARY" ;;
+            *)          python3 monitor.py --format text --notify --github-output | tee -a "$GITHUB_STEP_SUMMARY" ;;
+          esac
 
       - name: Save seen-message state
-        if: ${{ !inputs.dry_run }}
+        if: ${{ inputs.mode != 'dry-run' && inputs.mode != 'test-alert' }}
         uses: actions/cache/save@v4
         with:
           path: state
