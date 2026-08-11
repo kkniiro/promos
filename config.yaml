@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# What to watch, and what counts as interesting.
+# Copy to config.yaml and edit. Never put your bot token in here -- keep it in
+# ${TELEGRAM_BOT_TOKEN} and set that as a GitHub secret.
+# ---------------------------------------------------------------------------
+
+# "bot" -> read a group your bot was added to (works for PRIVATE groups)
+# "web" -> scrape https://t.me/s/<channel> (PUBLIC channels only, no token)
+source: bot
+
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+
+  # Only used when source: bot
+  # Leave empty to accept every chat the bot can see. Fill it in once you know
+  # the group id (run `python3 tools/whoami.py` to discover it) so a second
+  # group added later cannot start spamming you.
+  chat_id: ""
+
+  # Only used when source: web -- the public @name, without the @
+  channel: ""
+
+  # Where alerts get delivered. Your personal chat id with the bot -- this is
+  # what makes your phone buzz. `tools/whoami.py` prints it.
+  notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
+
+# If state is ever lost, ignore anything older than this so you do not get a
+# flood of stale promos. Set 0 to disable the guard.
+max_age_hours: 24
+
+# How long to remember a message so it is not re-alerted.
+retain_days: 14
+
+# ---------------------------------------------------------------------------
+# Rules. A message alerts if it satisfies ANY rule.
+# Within a rule:
+#   any       -> at least one of these must appear   (optional if `all` is set)
+#   all       -> every one of these must appear      (optional if `any` is set)
+#   none      -> if any of these appear, skip it
+#   max_price -> only alert if the cheapest price found is <= this
+#   min_price -> only alert if the cheapest price found is >= this
+#
+# Matching ignores case and accents, so "promocao" matches "Promoção".
+# Terms will not match mid-word: "tv" hits "TV" and "TVs" but not "netvibes".
+# NOTE: a price gate means messages with NO price are skipped by that rule.
+# ---------------------------------------------------------------------------
+rules:
+  - name: "iPhone"
+    any: ["iphone", "apple"]
+    none: ["capinha", "capa", "pelicula", "carregador", "cabo", "fone"]
+    max_price: 5000
+
+  - name: "Smart TV 55+"
+    all: ["tv"]
+    any: ["55", "65", "75"]
+    none: ["suporte", "rack"]
+    max_price: 3000
+
+  - name: "Videogame"
+    any: ["playstation", "ps5", "xbox", "nintendo switch"]
+    none: ["jogo", "game pass", "controle", "assinatura"]
+
+  - name: "Anything free"
+    any: ["gratis", "de graca", "freebie", "cupom 100%"]

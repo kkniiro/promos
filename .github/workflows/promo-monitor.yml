@@ -1,0 +1,69 @@
+name: promo monitor
+
+# Scheduled runs only happen on the DEFAULT branch. Until this file is merged
+# to main, use the "Run workflow" button (workflow_dispatch) to test it.
+on:
+  schedule:
+    - cron: "*/10 * * * *"     # every 10 min; GitHub treats this as best-effort
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Check for matches but do not notify or save state"
+        type: boolean
+        default: false
+
+# Never let two runs race on the state.
+concurrency:
+  group: promo-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install pyyaml
+
+      - name: Sanity-check the matcher
+        run: |
+          python3 monitor.py --self-test
+          python3 tests/test_dedupe.py
+
+      # State lives in the Actions cache rather than in git, so the repo does
+      # not collect a commit every 10 minutes. A cache miss is safe: the
+      # max_age_hours guard stops an empty state replaying the whole backlog.
+      # Cache keys are immutable, so each run writes a new one and restores the
+      # most recent via the shared prefix.
+      - name: Restore seen-message state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: promo-state-${{ github.run_id }}
+          restore-keys: promo-state-
+
+      - name: Poll the group
+        id: poll
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_NOTIFY_CHAT_ID: ${{ secrets.TELEGRAM_NOTIFY_CHAT_ID }}
+        run: |
+          python3 monitor.py \
+            --format text \
+            --github-output \
+            ${{ inputs.dry_run && '--dry-run' || '--notify' }} \
+            | tee "$GITHUB_STEP_SUMMARY"
+
+      - name: Save seen-message state
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: promo-state-${{ github.run_id }}

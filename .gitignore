@@ -1,0 +1,9 @@
+# config.yaml IS tracked on purpose -- the workflow needs it at runtime, and it
+# holds no secrets (the token is a ${TELEGRAM_BOT_TOKEN} reference resolved from
+# GitHub secrets). If this repo is public, note the group id is visible.
+
+__pycache__/
+*.pyc
+*.tmp
+.venv/
+state/*.tmp
