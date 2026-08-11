@@ -1,14 +1,19 @@
 # ---------------------------------------------------------------------------
-# Watching https://t.me/s/LaPromotion
+# Watching public Telegram channels. Reading them needs no credentials at all
+# -- no bot in the group, no account session, no api keys. Just an HTTP GET.
 #
-# It is a PUBLIC CHANNEL, so reading it needs no credentials at all -- no bot
-# in the group, no account session, no api keys. Just an HTTP GET.
+# Add more by appending to the list. If one channel goes private or is
+# renamed, the others are still checked and a warning names the broken one.
+# The same promo cross-posted to both only alerts once, because messages are
+# de-duplicated on their text rather than per channel.
 # ---------------------------------------------------------------------------
 
 source: web
 
 telegram:
-  channel: "LaPromotion"
+  channels:
+    - "LaPromotion"      # https://t.me/s/LaPromotion
+    - "lobaopromo"       # https://t.me/s/lobaopromo
 
 # ---------------------------------------------------------------------------
 # DELIVERY -- ntfy.sh, a separate app whose only job is these alerts.
@@ -88,6 +93,15 @@ rules:
 
   - name: "GoPro"
     any: ["gopro", "go pro", "go-pro"]
+
+  - name: "Monitor"
+    # Also matches "monitores". Excludes the mounting arms and cables.
+    any: ["monitor"]
+    none: ["suporte", "braco", "cabo"]
+
+  - name: "SSD"
+    # Also matches "SSDs". "nvme" and "m.2" are the same shelf.
+    any: ["ssd", "nvme"]
 
   - name: "Grátis"
     any: ["gratis", "gratuito", "de graca", "free", "brinde", "cupom 100%"]

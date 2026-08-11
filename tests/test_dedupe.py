@@ -110,6 +110,40 @@ def main():
             monitor.run_poll(dict(CONFIG), args)
         check("dry-run writes no state", dry.exists(), False)
 
+    # --- multi-channel resilience -------------------------------------------
+    import urllib.error
+
+    cfg = {"source": "web", "telegram": {"channels": ["good", "dead"]},
+           "notify_via": "ntfy", "ntfy": {"topic": "t"}}
+
+    def one_dead(channel):
+        if channel == "dead":
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        return [msg(1, "SSD 1TB por R$ 300,00")]
+
+    monitor._fetch_one_channel = one_dead
+    got, _ = monitor.fetch_via_web(cfg, {})
+    check("dead channel does not block the live one", len(got), 1)
+
+    def all_dead(channel):
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+
+    monitor._fetch_one_channel = all_dead
+    try:
+        monitor.fetch_via_web(cfg, {})
+        FAILURES.append("all channels dead: expected failure, got none")
+    except SystemExit:
+        pass
+
+    # Messages from several channels come back oldest-first, not grouped.
+    def two_channels(channel):
+        return ([msg(1, "a", ts=300)] if channel == "good"
+                else [msg(2, "b", ts=100), msg(3, "c", ts=200)])
+
+    monitor._fetch_one_channel = two_channels
+    got, _ = monitor.fetch_via_web(cfg, {})
+    check("merged channels sort by time", [m["ts"] for m in got], [100, 200, 300])
+
     check("brl format", monitor.brl(4299.9), "R$ 4.299,90")
     check("brl thousands", monitor.brl(1234567.5), "R$ 1.234.567,50")
 

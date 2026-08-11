@@ -206,8 +206,8 @@ CHANNEL_REQUIREMENTS = {
 def validate_config(config: dict) -> None:
     """Catch combinations that cannot work before we hit the network."""
     source = (config.get("source") or "user").lower()
-    if source == "web" and not (config.get("telegram", {}).get("channel") or "").strip():
-        sys.exit("error: source 'web' needs telegram.channel (the public @name, without the @)")
+    if source == "web" and not web_channels(config):
+        sys.exit("error: source 'web' needs telegram.channels (public @names, without the @)")
 
     channels = config.get("notify_via") or "ntfy"
     if isinstance(channels, str):
@@ -503,20 +503,22 @@ def fetch_via_user(config: dict, state: dict) -> tuple[list[dict], dict]:
     return messages, dict(state)
 
 
-def fetch_via_web(config: dict, state: dict) -> tuple[list[dict], dict]:
-    channel = (config.get("telegram", {}).get("channel") or "").strip().lstrip("@")
-    if not channel:
-        sys.exit("error: source 'web' needs telegram.channel (the public @name)")
+def web_channels(config: dict) -> list[str]:
+    """Public channels to read. Accepts `channels: [...]` or a single `channel`."""
+    tg = config.get("telegram") or {}
+    raw = tg.get("channels")
+    if raw is None:
+        raw = [tg.get("channel")] if tg.get("channel") else []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(c).strip().lstrip("@") for c in raw if str(c or "").strip()]
+
+
+def _fetch_one_channel(channel: str) -> list[dict]:
     url = f"https://t.me/s/{urllib.parse.quote(channel)}"
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=40) as resp:
-            html_text = resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        raise SystemExit(f"error: GET {url} failed ({exc.code}). Is the channel public?")
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"error: cannot reach t.me ({exc.reason}). "
-                         "If this is a Claude sandbox, t.me must be allowlisted.")
+    with urllib.request.urlopen(req, timeout=40) as resp:
+        html_text = resp.read().decode("utf-8", "replace")
 
     parser = _ChannelParser()
     parser.feed(html_text)
@@ -535,6 +537,33 @@ def fetch_via_web(config: dict, state: dict) -> tuple[list[dict], dict]:
             "chat": channel,
             "link": f"https://t.me/{post['post']}",
         })
+    return messages
+
+
+def fetch_via_web(config: dict, state: dict) -> tuple[list[dict], dict]:
+    channels = web_channels(config)
+    if not channels:
+        sys.exit("error: source 'web' needs telegram.channels (public @names, without the @)")
+
+    messages: list[dict] = []
+    failures = []
+    for channel in channels:
+        try:
+            got = _fetch_one_channel(channel)
+            messages.extend(got)
+            print(f"  {channel}: {len(got)} message(s)", file=sys.stderr)
+        except urllib.error.HTTPError as exc:
+            failures.append(f"{channel} ({exc.code}) -- is it public?")
+        except urllib.error.URLError as exc:
+            failures.append(f"{channel} ({exc.reason})")
+
+    for f in failures:
+        # One dead channel must not stop the others from being checked.
+        print(f"warn: could not read {f}", file=sys.stderr)
+    if failures and not messages:
+        sys.exit(f"error: every channel failed: {'; '.join(failures)}")
+
+    messages.sort(key=lambda m: m.get("ts") or 0)
     return messages, dict(state)
 
 
@@ -640,6 +669,13 @@ def build_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> dict:
             "chat": hit.get("chat")}
 
 
+def body_with_source(alert: dict) -> str:
+    """Message text plus which channel it came from -- matters once >1 is watched."""
+    if not alert.get("chat"):
+        return alert["body"]
+    return f"{alert['body']}\n\n— @{alert['chat']}"
+
+
 def notify_ntfy(config: dict, alerts: list[dict]) -> int:
     """ntfy.sh -- free, no account. A dedicated app you can leave unmuted."""
     cfg = config.get("ntfy") or {}
@@ -657,7 +693,7 @@ def notify_ntfy(config: dict, alerts: list[dict]) -> int:
         payload = {
             "topic": topic,
             "title": a["title"][:200],
-            "message": a["body"],
+            "message": body_with_source(a),
             "priority": priority,
             "tags": ["moneybag"],
         }
@@ -679,7 +715,8 @@ def notify_pushover(config: dict, alerts: list[dict]) -> int:
     sent = 0
     for a in alerts:
         form = {"token": token, "user": user, "title": a["title"][:250],
-                "message": a["body"][:1024], "priority": int(cfg.get("priority", 0))}
+                "message": body_with_source(a)[:1024],
+                "priority": int(cfg.get("priority", 0))}
         if a["url"]:
             form["url"] = a["url"]
             form["url_title"] = "open in telegram"
@@ -699,7 +736,7 @@ def notify_discord(config: dict, alerts: list[dict]) -> int:
         return 0
     sent = 0
     for a in alerts:
-        embed = {"title": a["title"][:250], "description": a["body"][:4000],
+        embed = {"title": a["title"][:250], "description": body_with_source(a)[:4000],
                  "color": 0x2ECC71}
         if a["url"]:
             embed["url"] = a["url"]
@@ -820,7 +857,7 @@ def render_telegram(alert: dict) -> str:
     if alert.get("price") is not None:
         lines.append(f"💰 {alert['title'].split(' - ', 1)[-1]}")
     lines.append("")
-    lines.append(esc(alert["body"]))
+    lines.append(esc(body_with_source(alert)))
     if alert.get("url"):
         lines.append("")
         lines.append(f'<a href="{esc(alert["url"])}">open in telegram</a>')
@@ -864,7 +901,7 @@ def run_poll(config: dict, args) -> int:
     if getattr(args, "dump", False):
         # Diagnostic: tells "nothing matched" apart from "nothing was read".
         print(f"fetched {len(messages)} message(s) from "
-              f"{config.get('telegram', {}).get('channel') or config.get('source')}\n")
+              f"{', '.join(web_channels(config)) or config.get('source')}\n")
         for m in messages:
             when = (datetime.fromtimestamp(m["ts"], timezone.utc).isoformat(timespec="minutes")
                     if m.get("ts") else "no timestamp")
@@ -1067,6 +1104,35 @@ def self_test() -> int:
     check("html nested tags", "Smart TV" in parser.posts[0]["text"], True)
     check("html br newline", "\n" in parser.posts[0]["text"], True)
     check("html entities", "&" in parser.posts[1]["text"], True)
+
+    # Channel list accepts a list, a bare string, or the old singular key.
+    check("channels list", web_channels({"telegram": {"channels": ["a", "@b"]}}), ["a", "b"])
+    check("channels string", web_channels({"telegram": {"channels": "solo"}}), ["solo"])
+    check("channels legacy key", web_channels({"telegram": {"channel": "@old"}}), ["old"])
+    check("channels blank dropped",
+          web_channels({"telegram": {"channels": ["a", "", None]}}), ["a"])
+    check("channels none", web_channels({"telegram": {}}), [])
+
+    # Source channel is shown on the alert, so two channels stay tellable apart.
+    src = build_alert({"text": "SSD 1TB", "link": None, "chat": "lobaopromo",
+                       "matches": [{"rule": "SSD", "terms": ["ssd"], "price": None}]})
+    check("body names channel", body_with_source(src).endswith("— @lobaopromo"), True)
+    check("body without channel",
+          body_with_source({"body": "x", "chat": None}), "x")
+
+    # The new keywords, against text taken from the real channel.
+    kw = compile_rules({"rules": [
+        {"name": "Monitor", "any": ["monitor"], "none": ["suporte", "braco", "cabo"]},
+        {"name": "SSD", "any": ["ssd", "nvme"]},
+    ]})
+    check("monitor real", [h["rule"] for h in
+                           match_rules("🔥 Monitor Gamer Haiz 27\" IPS 240Hz", kw)], ["Monitor"])
+    check("monitor plural", len(match_rules("Monitores em promocao", kw)), 1)
+    check("monitor excluded", match_rules("Suporte para monitor 27", kw), [])
+    check("ssd real", [h["rule"] for h in
+                       match_rules("SSD Kingston NV3 1TB PCIe 4.0", kw)], ["SSD"])
+    check("ssd plural", len(match_rules("SSDs em oferta", kw)), 1)
+    check("ssd not midword", match_rules("wssd generico", kw), [])
 
     # Fingerprint stability: an edit that only changes case/spacing is the same alert
     a = fingerprint({"text": "Smart TV  55  R$ 2.199,00"})
