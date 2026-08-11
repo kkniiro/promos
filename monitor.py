@@ -382,6 +382,9 @@ def fetch_via_bot(config: dict, state: dict) -> tuple[list[dict], dict]:
 # Blocks worth reading inside a post. The link preview matters as much as the
 # caption: channels that post a teaser ("MOLETOM DE BRUXO") put the actual
 # product name and price only in the preview of the link they attach.
+_VOID_TAGS = frozenset({"br", "img", "hr", "input", "meta", "link", "source",
+                        "area", "base", "col", "embed", "param", "track", "wbr"})
+
 _TEXT_BLOCKS = (
     "tgme_widget_message_text",
     "link_preview_title",
@@ -447,7 +450,7 @@ class _ChannelParser(HTMLParser):
             entry["time"] = entry["time"] or attrs["datetime"]
         if self._depth:
             # Already inside a text block: keep track of nesting.
-            if tag not in ("br", "img", "hr", "input", "meta", "link"):
+            if tag not in _VOID_TAGS:
                 self._depth += 1
             if tag == "br":
                 self._buf.append("\n")
@@ -456,7 +459,15 @@ class _ChannelParser(HTMLParser):
             self._depth = 1
             self._buf = []
 
+    def handle_startendtag(self, tag, attrs):
+        # "<br/>" would otherwise run starttag AND endtag, and the endtag would
+        # close the text block at the first line break -- truncating every
+        # multi-line promo to its first line.
+        self.handle_starttag(tag, attrs)
+
     def handle_endtag(self, tag):
+        if tag in _VOID_TAGS:
+            return                      # never opened a level, must not close one
         if self._depth:
             self._depth -= 1
             if self._depth == 0:
@@ -1129,6 +1140,29 @@ def self_test() -> int:
     """
     parser = _ChannelParser()
     parser.feed(sample)
+
+    # A real multi-line promo. "<br/>" is self-closing, which HTMLParser turns
+    # into starttag+endtag -- if the endtag closes the block, everything after
+    # the first line is lost, including the product name and the price.
+    multiline = (
+        '<div class="tgme_widget_message" data-post="loba/1">'
+        '<div class="tgme_widget_message_text">CARGA NOVA PRA N&Atilde;O RASPAR NO SECO'
+        '<br/><br/>\U0001f9f4 Gillette Mach3 Aparelho + 01 Carga (3 unidades)'
+        '<br/>\U0001f4b0 R$ 37,94 &agrave; vista'
+        '<br/>- Adicione 3 unidades ao carrinho'
+        '<br/>- Desconto aplicado na finaliza&ccedil;&atilde;o da compra<br/><br/>'
+        '<a href="https://amzlink.to/az0HrkBbre3o3">https://amzlink.to/az0HrkBbre3o3</a>'
+        '</div><time datetime="2026-08-11T09:08:00+00:00"></time></div>'
+    )
+    ml = _ChannelParser()
+    ml.feed(multiline)
+    check("multiline post count", len(ml.posts), 1)
+    body = ml.posts[0]["text"]
+    check("multiline keeps first line", "CARGA NOVA" in body, True)
+    check("multiline keeps product", "Gillette Mach3" in body, True)
+    check("multiline keeps price", extract_prices(body), [37.94])
+    check("multiline keeps link", "amzlink.to" in body, True)
+    check("multiline keeps time", ml.posts[0]["time"], "2026-08-11T09:08:00+00:00")
 
     # A teaser caption whose product name lives only in the link preview.
     teaser = """
