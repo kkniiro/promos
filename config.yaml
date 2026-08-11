@@ -117,3 +117,68 @@ rules:
   # price-glitch posts, but it is looser: "bugiganga" would match too.
   - name: "Bug"
     contains: ["bug"]
+
+  # --- Roupas -------------------------------------------------------------
+  # Plurals are automatic: "camisa" also matches "camisas", "short" matches
+  # "shorts". The `none` list drops women's and kids' listings -- delete that
+  # line to catch everything regardless of who it is cut for.
+  - name: "Roupas"
+    any:
+      - "camisa"
+      - "camiseta"
+      - "blusa"
+      - "polo"
+      - "regata"
+      - "moletom"
+      - "casaco"
+      - "jaqueta"
+      - "colete"
+      - "sueter"
+      - "cardiga"
+      - "agasalho"
+      - "corta-vento"
+      - "blazer"
+      - "terno"
+      - "gravata"
+      - "calca"
+      - "jeans"
+      - "bermuda"
+      - "short"
+      - "tactel"
+      - "oversized"
+      - "pijama"
+      - "cueca"
+      - "boxer"
+      - "sunga"
+      - "meias"          # singular "meia" also means "half" (meia duzia)
+    none: ["feminina", "feminino", "infantil", "infantis", "menina", "bebe"]
+
+  # --- Calçados -----------------------------------------------------------
+  - name: "Calçados"
+    any:
+      - "tenis"
+      - "sapato"
+      - "sapatenis"
+      - "chinelo"
+      - "sandalia"
+      - "papete"
+      - "coturno"
+      - "botina"
+      - "botas"          # singular "bota" collides with the verb: "bota no carrinho"
+      - "mocassim"
+      - "crocs"
+      - "havaianas"
+    none: ["feminina", "feminino", "infantil", "infantis", "menina", "bebe"]
+
+  # --- Acessórios ---------------------------------------------------------
+  - name: "Acessórios"
+    any:
+      - "oculos"
+      - "bone"
+      - "cinto"
+      - "carteira"
+      - "mochila"
+      - "relogio"
+      - "pochete"
+      - "corrente"
+    none: ["feminina", "feminino", "infantil", "infantis", "menina", "bebe"]
