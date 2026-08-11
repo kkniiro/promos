@@ -110,6 +110,34 @@ def main():
     check("brl format", monitor.brl(4299.9), "R$ 4.299,90")
     check("brl thousands", monitor.brl(1234567.5), "R$ 1.234.567,50")
 
+    # Delivery routing: notify_via picks the channel, and one failing send
+    # must not stop the rest of the batch.
+    hits = [{"text": "iPhone 15 R$ 4.299,00", "link": "https://t.me/p/1",
+             "matches": [{"rule": "iPhone", "terms": ["iphone"], "price": 4299.0}]},
+            {"text": "Ebook GRÁTIS", "link": None,
+             "matches": [{"rule": "Free", "terms": ["gratis"], "price": None}]}]
+
+    calls = []
+    monitor.send_telegram_dm = lambda cfg, text: (calls.append(text), True)[1]
+    check("via bot delivers all", monitor.deliver({"notify_via": "bot"}, hits), 2)
+    check("alert has rule name", "iPhone" in calls[0], True)
+    check("alert has BR price", "R$ 4.299,00" in calls[0], True)
+    check("alert has link", "https://t.me/p/1" in calls[0], True)
+
+    monitor.send_telegram_dm = lambda cfg, text: "GRÁTIS" in text
+    check("partial failure keeps going", monitor.deliver({"notify_via": "bot"}, hits), 1)
+
+    routed = []
+    monitor.send_saved_messages = lambda cfg, texts: (routed.extend(texts), len(texts))[1]
+    check("via saved delivers batch", monitor.deliver({"notify_via": "saved"}, hits), 2)
+    check("saved got both", len(routed), 2)
+
+    # HTML in a promo must not break Telegram's HTML parse_mode.
+    esc = monitor.format_alert({"text": "TV <55\"> & more", "link": None,
+                                "matches": [{"rule": "TV", "terms": ["tv"], "price": None}]})
+    check("escapes angle brackets", "<55" not in esc, True)
+    check("escapes ampersand", "&amp;" in esc, True)
+
     if FAILURES:
         print("INTEGRATION TEST FAILED")
         for f in FAILURES:

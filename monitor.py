@@ -319,6 +319,73 @@ class _ChannelParser(HTMLParser):
             self._buf.append(data)
 
 
+# --------------------------------------------------------------------------
+# Source: your own account (groups you are only a member of)
+# --------------------------------------------------------------------------
+
+def fetch_via_user(config: dict, state: dict) -> tuple[list[dict], dict]:
+    """Read a group through your own Telegram account.
+
+    This is the only option for a group you do not administer: a bot cannot be
+    added by a non-admin, and t.me/s/ previews exist only for public channels.
+    Your account already receives these messages -- this just reads them.
+
+    Needs Telethon: pip install telethon
+    """
+    tg = config.get("telegram", {})
+    api_id, api_hash = str(tg.get("api_id") or "").strip(), (tg.get("api_hash") or "").strip()
+    session = (tg.get("session") or "").strip()
+    target = tg.get("chat_id")
+
+    # Config errors first, so a missing secret reads as a config problem even
+    # when Telethon is not installed yet.
+    missing = [n for n, v in (("api_id", api_id), ("api_hash", api_hash),
+                              ("session", session)) if not v]
+    if missing:
+        sys.exit(f"error: source 'user' needs telegram.{', telegram.'.join(missing)}\n"
+                 "       run tools/login.py once to generate them")
+    if target in (None, ""):
+        sys.exit("error: source 'user' needs telegram.chat_id -- run tools/login.py to list your groups")
+
+    try:
+        from telethon.sessions import StringSession
+        from telethon.sync import TelegramClient
+    except ImportError:
+        sys.exit("error: source 'user' needs Telethon -- run: pip install telethon")
+
+    try:
+        target = int(str(target).strip())
+    except ValueError:
+        target = str(target).strip().lstrip("@")   # public @username also works
+
+    limit = int(config.get("fetch_limit", 60))
+    messages = []
+    with TelegramClient(StringSession(session), int(api_id), api_hash) as client:
+        entity = client.get_entity(target)
+        title = getattr(entity, "title", None) or getattr(entity, "username", "") or str(target)
+        username = getattr(entity, "username", None)
+        for m in client.iter_messages(entity, limit=limit):
+            text = (m.message or "") or (getattr(m, "caption", "") or "")
+            if not text.strip():
+                continue
+            if username:
+                link = f"https://t.me/{username}/{m.id}"
+            else:
+                # Private supergroups are addressed as t.me/c/<id-without-prefix>/<msg>
+                internal = str(getattr(entity, "id", "")).lstrip("-")
+                link = f"https://t.me/c/{internal}/{m.id}"
+            messages.append({
+                "id": f"{getattr(entity, 'id', target)}:{m.id}",
+                "text": text,
+                "ts": int(m.date.timestamp()) if m.date else None,
+                "chat": title,
+                "link": link,
+            })
+
+    messages.reverse()          # oldest first, so alerts arrive in order
+    return messages, dict(state)
+
+
 def fetch_via_web(config: dict, state: dict) -> tuple[list[dict], dict]:
     channel = (config.get("telegram", {}).get("channel") or "").strip().lstrip("@")
     if not channel:
@@ -412,6 +479,46 @@ def send_telegram_dm(config: dict, text: str) -> bool:
         return False
 
 
+def send_saved_messages(config: dict, texts: list[str]) -> int:
+    """Deliver alerts to your own Saved Messages -- no bot involved at all.
+
+    Opening a session is slow, so the whole batch goes out in one connection.
+    """
+    try:
+        from telethon.sessions import StringSession
+        from telethon.sync import TelegramClient
+    except ImportError:
+        print("warn: notify skipped -- pip install telethon", file=sys.stderr)
+        return 0
+    tg = config.get("telegram", {})
+    try:
+        with TelegramClient(StringSession(tg.get("session", "")),
+                            int(tg.get("api_id")), tg.get("api_hash")) as client:
+            sent = 0
+            for text in texts:
+                client.send_message("me", text[:4096], parse_mode="html")
+                sent += 1
+                time.sleep(0.4)
+            return sent
+    except Exception as exc:                      # noqa: BLE001 - never crash the poll
+        print(f"warn: saved-messages notify failed -- {exc}", file=sys.stderr)
+        return 0
+
+
+def deliver(config: dict, hits: list[dict]) -> int:
+    """Send every match through whichever channel is configured."""
+    via = (config.get("notify_via") or "bot").lower()
+    bodies = [format_alert(h) for h in hits]
+    if via == "saved":
+        return send_saved_messages(config, bodies)
+    sent = 0
+    for body in bodies:
+        if send_telegram_dm(config, body):
+            sent += 1
+            time.sleep(0.4)                       # stay under Telegram's rate cap
+    return sent
+
+
 def brl(value: float) -> str:
     """Format 4299.9 as 'R$ 4.299,90' -- thousands dot, decimal comma."""
     return "R$ " + f"{value:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
@@ -455,13 +562,15 @@ def run_poll(config: dict, args) -> int:
         messages = json.loads(Path(args.replay).read_text(encoding="utf-8"))
         new_state = {}
     else:
-        source = (config.get("source") or "bot").lower()
-        if source == "bot":
+        source = (config.get("source") or "user").lower()
+        if source == "user":
+            messages, new_state = fetch_via_user(config, state)
+        elif source == "bot":
             messages, new_state = fetch_via_bot(config, state)
         elif source == "web":
             messages, new_state = fetch_via_web(config, state)
         else:
-            sys.exit(f"error: unknown source '{source}' (expected 'bot' or 'web')")
+            sys.exit(f"error: unknown source '{source}' (expected 'user', 'bot', or 'web')")
 
     # Guard rail: if state was lost, do not replay days of backlog to the phone.
     max_age = int(config.get("max_age_hours", 24))
@@ -491,10 +600,7 @@ def run_poll(config: dict, args) -> int:
 
     sent = 0
     if args.notify and hits and not args.dry_run:
-        for hit in hits:
-            if send_telegram_dm(config, format_alert(hit)):
-                sent += 1
-                time.sleep(0.4)   # stay under Telegram's ~30 msg/s cap
+        sent = deliver(config, hits)
 
     summary = {
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
