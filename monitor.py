@@ -1237,6 +1237,41 @@ def self_test() -> int:
     check("ssd plural", len(match_rules("SSDs em oferta", kw)), 1)
     check("ssd not midword", match_rules("wssd generico", kw), [])
 
+    # Clothing terms that collide with ordinary Portuguese words.
+    clothes = compile_rules({"rules": [
+        {"name": "Roupas", "any": ["camisa", "camiseta", "short", "calca", "meias",
+                                   "polo", "moletom"],
+         "none": ["feminina", "feminino", "infantil"]},
+        {"name": "Calcados", "any": ["tenis", "sapato", "botas", "chinelo"],
+         "none": ["feminina", "feminino", "infantil"]},
+        {"name": "Acessorios", "any": ["oculos", "bone", "cinto"]},
+    ]})
+
+    def fires(text):
+        return [h["rule"] for h in match_rules(text, clothes)]
+
+    check("camisa", fires("Camisa Polo Masculina"), ["Roupas"])
+    check("camisa plural", fires("Kit 3 camisas"), ["Roupas"])
+    # "camiseta" is not "camisa" + a plural, so both terms are needed.
+    check("camiseta distinct", fires("Camiseta Oversized"), ["Roupas"])
+    check("short plural", fires("Kit 4 Short Praia Bermuda Tactel"), ["Roupas"])
+    check("calca", fires("Calça Jeans Masculina"), ["Roupas"])
+    check("calca not calcado", fires("Calçado esportivo"), [])
+    check("tenis accent", fires("Tênis Nike Revolution"), ["Calcados"])
+    check("sapato", fires("Sapato social"), ["Calcados"])
+    check("oculos accent", fires("Óculos de sol polarizado"), ["Acessorios"])
+    check("bone accent", fires("Boné aba curva"), ["Acessorios"])
+
+    # The traps: "bota no carrinho" is a verb, "meia duzia" is a fraction.
+    check("bota is a verb here", fires("bota no carrinho e aproveita"), [])
+    check("botas still match", fires("Botas de couro masculinas"), ["Calcados"])
+    check("meia duzia is not socks", fires("meia duzia de ovos"), [])
+    check("meias match", fires("Kit 10 pares de meias"), ["Roupas"])
+    # Women's and kids' listings are filtered out.
+    check("feminina excluded", fires("Camiseta Feminina Cropped"), [])
+    check("infantil excluded", fires("Tênis infantil"), [])
+    check("masculina kept", fires("Camiseta Masculina Dry Fit"), ["Roupas"])
+
     # Fingerprint stability: an edit that only changes case/spacing is the same alert
     a = fingerprint({"text": "Smart TV  55  R$ 2.199,00"})
     b = fingerprint({"text": "SMART TV 55 R$ 2.199,00"})
