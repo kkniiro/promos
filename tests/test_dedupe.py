@@ -21,6 +21,8 @@ import monitor  # noqa: E402
 CONFIG = {
     "source": "bot",
     "telegram": {"bot_token": "x", "notify_chat_id": "1"},
+    "notify_via": "ntfy",
+    "ntfy": {"topic": "test-topic"},
     "max_age_hours": 24,
     "retain_days": 14,
     "rules": [
@@ -131,6 +133,95 @@ def main():
     monitor.send_saved_messages = lambda cfg, texts: (routed.extend(texts), len(texts))[1]
     check("via saved delivers batch", monitor.deliver({"notify_via": "saved"}, hits), 2)
     check("saved got both", len(routed), 2)
+
+    # --- non-Telegram channels, with the HTTP layer stubbed -----------------
+    posts = []
+
+    def fake_post(url, payload=None, data=None, headers=None, timeout=20):
+        posts.append({"url": url, "payload": payload, "data": data,
+                      "headers": headers or {}})
+        return True
+
+    monitor._http_post = fake_post
+
+    posts.clear()
+    n = monitor.deliver({"notify_via": "ntfy",
+                         "ntfy": {"topic": "abc123", "priority": 4}}, hits)
+    check("ntfy sends each match", n, 2)
+    check("ntfy hits ntfy.sh", posts[0]["url"], "https://ntfy.sh")
+    check("ntfy carries topic", posts[0]["payload"]["topic"], "abc123")
+    check("ntfy title has price", "R$ 4.299,00" in posts[0]["payload"]["title"], True)
+    check("ntfy click-through", posts[0]["payload"]["click"], "https://t.me/p/1")
+    check("ntfy omits click when no link", "click" in posts[1]["payload"], False)
+    check("ntfy priority passed", posts[0]["payload"]["priority"], 4)
+
+    posts.clear()
+    n = monitor.deliver({"notify_via": "ntfy",
+                         "ntfy": {"topic": "t", "server": "https://push.example.com/"}}, hits)
+    check("ntfy honours self-hosted server", posts[0]["url"], "https://push.example.com")
+
+    posts.clear()
+    monitor.deliver({"notify_via": "pushover",
+                     "pushover": {"token": "tk", "user_key": "uk"}}, hits)
+    check("pushover endpoint", posts[0]["url"], "https://api.pushover.net/1/messages.json")
+    check("pushover form-encoded", b"token=tk" in posts[0]["data"], True)
+
+    posts.clear()
+    monitor.deliver({"notify_via": "discord",
+                     "discord": {"webhook_url": "https://discord.com/api/webhooks/x"}}, hits)
+    check("discord sends embed", "embeds" in posts[0]["payload"], True)
+
+    posts.clear()
+    monitor.deliver({"notify_via": "webhook",
+                     "webhook": {"url": "https://example.com/h",
+                                 "headers": {"X-Key": "s"}}}, hits)
+    check("webhook custom header", posts[0]["headers"].get("X-Key"), "s")
+
+    # Two channels at once: both fire, and the count is per-promo not per-send.
+    posts.clear()
+    n = monitor.deliver({"notify_via": ["ntfy", "discord"],
+                         "ntfy": {"topic": "t"},
+                         "discord": {"webhook_url": "https://discord.com/api/webhooks/x"}},
+                        hits)
+    check("fan-out posts to both", len(posts), 4)
+    check("fan-out counts promos once", n, 2)
+
+    # A dead channel must not stop a healthy one.
+    def flaky_post(url, payload=None, data=None, headers=None, timeout=20):
+        posts.append(url)
+        return "discord" not in url
+
+    monitor._http_post = flaky_post
+    posts.clear()
+    n = monitor.deliver({"notify_via": ["discord", "ntfy"],
+                         "ntfy": {"topic": "t"},
+                         "discord": {"webhook_url": "https://discord.com/api/webhooks/x"}},
+                        hits)
+    check("healthy channel survives a dead one", n, 2)
+
+    # Unknown channel warns, does not crash.
+    monitor._http_post = fake_post
+    check("unknown channel is not fatal", monitor.deliver({"notify_via": "carrier-pigeon"},
+                                                          hits), 0)
+
+    # --- config validation --------------------------------------------------
+    def expect_exit(label, cfg):
+        try:
+            monitor.validate_config(cfg)
+        except SystemExit:
+            return
+        FAILURES.append(f"{label}: expected config rejection, got none")
+
+    expect_exit("ntfy without topic", {"source": "web", "telegram": {"channel": "c"},
+                                       "notify_via": "ntfy"})
+    expect_exit("saved without user source", {"source": "web", "telegram": {"channel": "c"},
+                                              "notify_via": "saved"})
+    expect_exit("empty notify_via", {"source": "web", "telegram": {"channel": "c"},
+                                     "notify_via": []})
+    expect_exit("bot without token", {"source": "web", "telegram": {"channel": "c"},
+                                      "notify_via": "bot"})
+    monitor.validate_config({"source": "web", "telegram": {"channel": "LaPromotion"},
+                             "notify_via": "ntfy", "ntfy": {"topic": "x"}})
 
     # HTML in a promo must not break Telegram's HTML parse_mode.
     esc = monitor.format_alert({"text": "TV <55\"> & more", "link": None,

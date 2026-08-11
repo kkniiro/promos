@@ -84,15 +84,48 @@ you want shows up as a `channel` with an `@name`, use Path A instead.
 
 ## 3. Choose how alerts reach you
 
-| `notify_via` | what happens | needs |
+If your Telegram notifications are muted — because a hundred groups would be
+unbearable otherwise — **do not deliver alerts through Telegram**. Use a
+separate app whose only job is these alerts, and leave that one loud.
+
+| `notify_via` | what it is | needs |
 |---|---|---|
-| `saved` | the alert lands in your own Telegram **Saved Messages** | nothing extra (Path B only) |
-| `bot` | your own bot DMs you — a separate chat, so alerts stay out of your notes | a bot from @BotFather, and you send it one message. **You do not need to add it to any group.** |
+| **`ntfy`** ⭐ | **[ntfy.sh](https://ntfy.sh) — a free push app, no account, no signup. Install it, subscribe to one topic, done.** | nothing |
+| `pushover` | [Pushover](https://pushover.net) — more polished, proper accounts | $5 one-time |
+| `discord` | posts to a Discord webhook (per-server mute is separate from Telegram) | a webhook URL |
+| `webhook` | generic JSON POST — Slack, Zapier, Home Assistant, your own endpoint | a URL |
+| `bot` | a Telegram bot DMs you | a bot from @BotFather |
+| `saved` | your own Telegram Saved Messages | Path B only |
 
-Either way your phone buzzes through Telegram itself, so there is no extra app.
+`notify_via` also takes a list to send to several at once:
 
-For `bot`, create it with **@BotFather** → `/newbot`, send it any DM, then run
-`python3 tools/whoami.py` to get your `notify_chat_id`.
+```yaml
+notify_via: ["ntfy", "discord"]
+```
+
+### Setting up ntfy (recommended)
+
+1. Install **ntfy** — [App Store](https://apps.apple.com/app/ntfy/id1625396347) ·
+   [Play Store](https://play.google.com/store/apps/details?id=io.heckel.ntfy) ·
+   [F-Droid](https://f-droid.org/packages/io.heckel.ntfy/)
+2. Tap **+** → *Subscribe to topic* → paste the topic from `config.yaml`
+3. That is it. Tapping a notification opens the promo in Telegram.
+
+> **The topic name is the only thing keeping strangers out** on the public
+> ntfy.sh server — anyone who guesses it can read your alerts or send you junk.
+> The one in `config.yaml` is long and random on purpose; do not shorten it. If
+> this repo is public, move it to an `NTFY_TOPIC` secret, or
+> [self-host](https://docs.ntfy.sh/install/) / use
+> [access tokens](https://docs.ntfy.sh/config/#access-control).
+
+### Check it works before trusting it
+
+```bash
+python3 monitor.py --test-alert
+```
+
+Sends one fake promo through whatever you configured. From GitHub, use
+*Actions* → *Run workflow* → mode **test-alert**.
 
 ---
 
@@ -109,12 +142,13 @@ Repo → *Settings* → *Secrets and variables* → *Actions*:
 
 | secret | needed for |
 |---|---|
-| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | Path B |
-| `TELEGRAM_SESSION` | Path B (from `tools/login.py`) |
-| `TELEGRAM_BOT_TOKEN` | only if `notify_via: bot` |
-| `TELEGRAM_NOTIFY_CHAT_ID` | only if `notify_via: bot` |
+| `NTFY_TOPIC` / `NTFY_TOKEN` | only if you move the topic out of the config, or self-host |
+| `PUSHOVER_TOKEN` / `PUSHOVER_USER_KEY` | `notify_via: pushover` |
+| `DISCORD_WEBHOOK_URL` | `notify_via: discord` |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_NOTIFY_CHAT_ID` | `notify_via: bot` |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SESSION` | Path B only |
 
-Path A with `notify_via: saved` needs none of these.
+**A public channel with `notify_via: ntfy` needs no secrets at all.**
 
 ## 6. Turn it on
 
@@ -186,6 +220,7 @@ python3 monitor.py                  # poll, print JSON, update state
 python3 monitor.py --notify         # ...and push matches to your phone
 python3 monitor.py --format text    # human-readable
 python3 monitor.py --dry-run        # touch nothing, send nothing
+python3 monitor.py --test-alert     # send one fake alert to check delivery
 python3 monitor.py --self-test      # offline checks, no config needed
 python3 tests/test_dedupe.py        # state/dedupe integration checks
 ```

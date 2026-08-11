@@ -33,13 +33,39 @@ telegram:
   bot_token: ${TELEGRAM_BOT_TOKEN}
   notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
 
-# Where alerts land on your phone:
-#   saved -> your own Telegram "Saved Messages". No bot needed at all.
-#            Requires source: user (it reuses the same session).
-#   bot   -> a DM from your own bot. A separate chat, so alerts do not mix in
-#            with notes you save yourself. Create the bot with @BotFather and
-#            send it one message -- you do NOT need to add it to any group.
-notify_via: saved
+# Where alerts land on your phone. Takes one name or a list.
+#   ntfy     -> ntfy.sh, a free push app. No account, no signup. BEST CHOICE if
+#               your Telegram is muted, since it is a separate app you can leave
+#               loud without unmuting a hundred groups.
+#   pushover -> Pushover. More polished, $5 one-time.
+#   discord  -> a Discord webhook (per-server mute is independent of Telegram).
+#   webhook  -> generic JSON POST: Slack, Zapier, Home Assistant, your own app.
+#   bot      -> a DM from your own Telegram bot. You do NOT need to add it to
+#               any group -- it only ever messages you.
+#   saved    -> your own Telegram "Saved Messages". Requires source: user.
+#
+# Verify whichever you pick with:  python3 monitor.py --test-alert
+notify_via: ntfy
+
+ntfy:
+  # Anyone who knows this topic can read your alerts on the public server,
+  # so make it long and random. `python3 -c "import secrets;
+  # print(secrets.token_urlsafe(12))"` is a good source.
+  topic: ""
+  priority: 4        # 5 = max urgency, 4 = high, 3 = default
+  # server: "https://ntfy.sh"     # change only if self-hosting
+  # token: ${NTFY_TOKEN}          # only for protected topics
+
+pushover:
+  token: ${PUSHOVER_TOKEN}
+  user_key: ${PUSHOVER_USER_KEY}
+
+discord:
+  webhook_url: ${DISCORD_WEBHOOK_URL}
+
+webhook:
+  url: ${WEBHOOK_URL}
+  headers: {}
 
 # How many recent messages to pull per poll (source: user).
 fetch_limit: 60

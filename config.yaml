@@ -3,8 +3,6 @@
 #
 # It is a PUBLIC CHANNEL, so reading it needs no credentials at all -- no bot
 # in the group, no account session, no api keys. Just an HTTP GET.
-#
-# The only credentials here are for DELIVERING the alert to your phone.
 # ---------------------------------------------------------------------------
 
 source: web
@@ -12,15 +10,30 @@ source: web
 telegram:
   channel: "LaPromotion"
 
-  # Delivery: a bot that DMs you. You never add it to the channel -- it only
-  # ever messages you. @BotFather > /newbot, then DM the bot once and run
-  # `python3 tools/whoami.py` to get your notify_chat_id.
-  bot_token: ${TELEGRAM_BOT_TOKEN}
-  notify_chat_id: ${TELEGRAM_NOTIFY_CHAT_ID}
+# ---------------------------------------------------------------------------
+# DELIVERY -- ntfy.sh, a separate app whose only job is these alerts.
+# Your Telegram stays muted; this one app you leave loud.
+# Free, no account, no signup.
+#
+#   1. install "ntfy" (App Store / Play Store / F-Droid)
+#   2. Subscribe to topic -> paste the topic below
+#   3. done -- tapping a notification opens the promo in Telegram
+#
+# The topic name is the ONLY thing keeping strangers out of it on the public
+# server, which is why it is long and random. Do not shorten it. If this repo
+# is public, move it to a ${NTFY_TOPIC} secret instead.
+# ---------------------------------------------------------------------------
+notify_via: ntfy
 
-notify_via: bot
+ntfy:
+  topic: "lapromo-rtu6x3uoie2xncx"
+  # 5 = max urgency (bypasses some Do Not Disturb), 4 = high, 3 = default
+  priority: 4
+  # Only if you self-host ntfy, or use an access token on ntfy.sh:
+  # server: "https://ntfy.sh"
+  # token: ${NTFY_TOKEN}
 
-# Prices are read in any common currency, but thresholds below are in R$.
+# Prices are read in any common currency; thresholds below are in R$.
 currency_symbol: "R$"
 currency_style: eu        # 1.234,56  (use "us" for 1,234.56)
 

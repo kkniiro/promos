@@ -145,18 +145,42 @@ def load_config(path: Path) -> dict:
     return _expand_env(data)
 
 
+# What each delivery channel needs before it can send anything.
+CHANNEL_REQUIREMENTS = {
+    "ntfy": [("ntfy", "topic")],
+    "pushover": [("pushover", "token"), ("pushover", "user_key")],
+    "discord": [("discord", "webhook_url")],
+    "webhook": [("webhook", "url")],
+    "bot": [("telegram", "bot_token"), ("telegram", "notify_chat_id")],
+    "saved": [("telegram", "api_id"), ("telegram", "api_hash"), ("telegram", "session")],
+}
+
+
 def validate_config(config: dict) -> None:
     """Catch combinations that cannot work before we hit the network."""
     source = (config.get("source") or "user").lower()
-    via = (config.get("notify_via") or "bot").lower()
-    if via == "saved" and source != "user":
-        sys.exit("error: notify_via 'saved' reuses the account session from source 'user',\n"
-                 f"       but source is '{source}'. Use notify_via: bot (a bot you never\n"
-                 "       have to add to the group), or switch source to 'user'.")
-    if via not in ("bot", "saved"):
-        sys.exit(f"error: unknown notify_via '{via}' (expected 'bot' or 'saved')")
     if source == "web" and not (config.get("telegram", {}).get("channel") or "").strip():
         sys.exit("error: source 'web' needs telegram.channel (the public @name, without the @)")
+
+    channels = config.get("notify_via") or "ntfy"
+    if isinstance(channels, str):
+        channels = [channels]
+    if not channels:
+        sys.exit("error: notify_via is empty -- nothing would ever reach you")
+
+    for raw in channels:
+        name = str(raw).lower()
+        if name not in NOTIFIERS:
+            sys.exit(f"error: unknown notify_via '{raw}' (expected one of "
+                     f"{', '.join(sorted(NOTIFIERS))})")
+        if name == "saved" and source != "user":
+            sys.exit("error: notify_via 'saved' reuses the account session from source "
+                     f"'user',\n       but source is '{source}'. Pick another channel "
+                     "(ntfy needs no account at all).")
+        missing = [f"{sect}.{key}" for sect, key in CHANNEL_REQUIREMENTS[name]
+                   if not str((config.get(sect) or {}).get(key) or "").strip()]
+        if missing:
+            sys.exit(f"error: notify_via '{name}' needs {', '.join(missing)} in config.yaml")
 
 
 def compile_rules(config: dict) -> list[dict]:
@@ -499,6 +523,126 @@ def send_telegram_dm(config: dict, text: str) -> bool:
         return False
 
 
+def _http_post(url: str, payload: dict | None = None, data: bytes | None = None,
+               headers: dict | None = None, timeout: int = 20) -> bool:
+    """POST JSON (or raw bytes) and report whether it was accepted."""
+    hdrs = {"User-Agent": USER_AGENT}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data or b"", headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:200]
+        print(f"warn: POST {urllib.parse.urlparse(url).netloc} -> {exc.code}: {body}",
+              file=sys.stderr)
+    except urllib.error.URLError as exc:
+        print(f"warn: POST {urllib.parse.urlparse(url).netloc} failed: {exc.reason}",
+              file=sys.stderr)
+    return False
+
+
+def build_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> dict:
+    """Channel-neutral view of a match; each notifier renders this its own way."""
+    rules = ", ".join(sorted({h["rule"] for h in hit["matches"]}))
+    terms = sorted({t for h in hit["matches"] for t in h["terms"]})
+    price = next((h["price"] for h in hit["matches"] if h["price"] is not None), None)
+    body = hit["text"].strip()
+    if len(body) > 900:
+        body = body[:900].rstrip() + "..."
+    title = rules if price is None else f"{rules} - {money(price, symbol, style)}"
+    return {"title": title, "rules": rules, "terms": terms, "price": price,
+            "body": body, "url": hit.get("link"), "chat": hit.get("chat")}
+
+
+def notify_ntfy(config: dict, alerts: list[dict]) -> int:
+    """ntfy.sh -- free, no account. A dedicated app you can leave unmuted."""
+    cfg = config.get("ntfy") or {}
+    topic = (cfg.get("topic") or "").strip()
+    if not topic:
+        print("warn: notify skipped -- set ntfy.topic", file=sys.stderr)
+        return 0
+    server = (cfg.get("server") or "https://ntfy.sh").rstrip("/")
+    priority = int(cfg.get("priority", 4))
+    token = (cfg.get("token") or "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    sent = 0
+    for a in alerts:
+        payload = {
+            "topic": topic,
+            "title": a["title"][:200],
+            "message": a["body"],
+            "priority": priority,
+            "tags": ["moneybag"],
+        }
+        if a["url"]:
+            payload["click"] = a["url"]
+        if _http_post(server, payload=payload, headers=headers):
+            sent += 1
+            time.sleep(0.2)
+    return sent
+
+
+def notify_pushover(config: dict, alerts: list[dict]) -> int:
+    cfg = config.get("pushover") or {}
+    token, user = (cfg.get("token") or "").strip(), (cfg.get("user_key") or "").strip()
+    if not token or not user:
+        print("warn: notify skipped -- set pushover.token and pushover.user_key",
+              file=sys.stderr)
+        return 0
+    sent = 0
+    for a in alerts:
+        form = {"token": token, "user": user, "title": a["title"][:250],
+                "message": a["body"][:1024], "priority": int(cfg.get("priority", 0))}
+        if a["url"]:
+            form["url"] = a["url"]
+            form["url_title"] = "open in telegram"
+        if _http_post("https://api.pushover.net/1/messages.json",
+                      data=urllib.parse.urlencode(form).encode(),
+                      headers={"Content-Type": "application/x-www-form-urlencoded"}):
+            sent += 1
+            time.sleep(0.2)
+    return sent
+
+
+def notify_discord(config: dict, alerts: list[dict]) -> int:
+    """Post to a Discord webhook -- useful since per-server mute is separate."""
+    url = ((config.get("discord") or {}).get("webhook_url") or "").strip()
+    if not url:
+        print("warn: notify skipped -- set discord.webhook_url", file=sys.stderr)
+        return 0
+    sent = 0
+    for a in alerts:
+        embed = {"title": a["title"][:250], "description": a["body"][:4000],
+                 "color": 0x2ECC71}
+        if a["url"]:
+            embed["url"] = a["url"]
+        if _http_post(url, payload={"embeds": [embed]}):
+            sent += 1
+            time.sleep(0.3)
+    return sent
+
+
+def notify_webhook(config: dict, alerts: list[dict]) -> int:
+    """Generic JSON POST -- Slack, Zapier, Home Assistant, your own endpoint."""
+    cfg = config.get("webhook") or {}
+    url = (cfg.get("url") or "").strip()
+    if not url:
+        print("warn: notify skipped -- set webhook.url", file=sys.stderr)
+        return 0
+    headers = cfg.get("headers") or {}
+    sent = 0
+    for a in alerts:
+        if _http_post(url, payload=a, headers=headers):
+            sent += 1
+            time.sleep(0.2)
+    return sent
+
+
 def send_saved_messages(config: dict, texts: list[str]) -> int:
     """Deliver alerts to your own Saved Messages -- no bot involved at all.
 
@@ -525,19 +669,51 @@ def send_saved_messages(config: dict, texts: list[str]) -> int:
         return 0
 
 
-def deliver(config: dict, hits: list[dict]) -> int:
-    """Send every match through whichever channel is configured."""
-    via = (config.get("notify_via") or "bot").lower()
-    bodies = [format_alert(h, config.get("currency_symbol", "R$"),
-                          config.get("currency_style", "eu")) for h in hits]
-    if via == "saved":
-        return send_saved_messages(config, bodies)
+def notify_telegram(config: dict, alerts: list[dict]) -> int:
     sent = 0
-    for body in bodies:
-        if send_telegram_dm(config, body):
+    for a in alerts:
+        if send_telegram_dm(config, render_telegram(a)):
             sent += 1
             time.sleep(0.4)                       # stay under Telegram's rate cap
     return sent
+
+
+def notify_saved(config: dict, alerts: list[dict]) -> int:
+    return send_saved_messages(config, [render_telegram(a) for a in alerts])
+
+
+NOTIFIERS = {
+    "ntfy": notify_ntfy,
+    "pushover": notify_pushover,
+    "discord": notify_discord,
+    "webhook": notify_webhook,
+    "bot": notify_telegram,
+    "saved": notify_saved,
+}
+
+
+def deliver(config: dict, hits: list[dict]) -> int:
+    """Fan every match out to each configured channel.
+
+    Returns the number of alerts delivered to at least one channel, so two
+    channels for one promo counts once. A channel that fails does not stop
+    the others.
+    """
+    alerts = [build_alert(h, config.get("currency_symbol", "R$"),
+                          config.get("currency_style", "eu")) for h in hits]
+    channels = config.get("notify_via") or "ntfy"
+    if isinstance(channels, str):
+        channels = [channels]
+
+    best = 0
+    for name in channels:
+        fn = NOTIFIERS.get(str(name).lower())
+        if fn is None:
+            print(f"warn: unknown notify_via '{name}' -- expected one of "
+                  f"{', '.join(sorted(NOTIFIERS))}", file=sys.stderr)
+            continue
+        best = max(best, fn(config, alerts))
+    return best
 
 
 def money(value: float, symbol: str = "R$", style: str = "eu") -> str:
@@ -553,28 +729,27 @@ def brl(value: float) -> str:
     return money(value)
 
 
-def format_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> str:
+def render_telegram(alert: dict) -> str:
+    """Telegram HTML rendering of a channel-neutral alert."""
     def esc(s):
         return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    rules = ", ".join(sorted({h["rule"] for h in hit["matches"]}))
-    terms = ", ".join(sorted({t for h in hit["matches"] for t in h["terms"]}))
-    body = hit["text"].strip()
-    if len(body) > 900:
-        body = body[:900].rstrip() + "..."
-
-    lines = [f"🔔 <b>{esc(rules)}</b>"]
-    price = next((h["price"] for h in hit["matches"] if h["price"] is not None), None)
-    if price is not None:
-        lines.append(f"💰 {money(price, symbol, style)}")
+    lines = [f"🔔 <b>{esc(alert['rules'])}</b>"]
+    if alert.get("price") is not None:
+        lines.append(f"💰 {alert['title'].split(' - ', 1)[-1]}")
     lines.append("")
-    lines.append(esc(body))
-    if hit.get("link"):
+    lines.append(esc(alert["body"]))
+    if alert.get("url"):
         lines.append("")
-        lines.append(f'<a href="{esc(hit["link"])}">open in telegram</a>')
-    if terms:
-        lines.append(f"<i>matched: {esc(terms)}</i>")
+        lines.append(f'<a href="{esc(alert["url"])}">open in telegram</a>')
+    if alert.get("terms"):
+        lines.append(f"<i>matched: {esc(', '.join(alert['terms']))}</i>")
     return "\n".join(lines)
+
+
+def format_alert(hit: dict, symbol: str = "R$", style: str = "eu") -> str:
+    """Convenience wrapper: raw match -> Telegram HTML."""
+    return render_telegram(build_alert(hit, symbol, style))
 
 
 # --------------------------------------------------------------------------
@@ -770,6 +945,8 @@ def main() -> int:
     ap.add_argument("--format", choices=["json", "text"], default="json")
     ap.add_argument("--replay", metavar="FILE", help="run rules against a JSON fixture")
     ap.add_argument("--self-test", action="store_true", help="offline sanity checks")
+    ap.add_argument("--test-alert", action="store_true",
+                    help="send one fake alert to confirm delivery is wired up")
     ap.add_argument("--github-output", action="store_true", help="emit match_count for Actions")
     args = ap.parse_args()
 
@@ -777,6 +954,26 @@ def main() -> int:
         return self_test()
 
     config = load_config(Path(args.config))
+
+    if args.test_alert:
+        validate_config(config)
+        fake = {
+            "text": "Teste do monitor: Smart TV 55\" 4K por R$ 1.999,00\n"
+                    "Se você recebeu isto no celular, está tudo funcionando.",
+            "link": f"https://t.me/s/{config.get('telegram', {}).get('channel', '')}",
+            "chat": "promo-monitor",
+            "matches": [{"rule": "test alert", "terms": ["teste"], "price": 1999.0}],
+        }
+        channels = config.get("notify_via") or "ntfy"
+        channels = [channels] if isinstance(channels, str) else channels
+        sent = deliver(config, [fake])
+        if sent:
+            print(f"sent a test alert via {', '.join(map(str, channels))} -- "
+                  "check your phone")
+            return 0
+        print("test alert was NOT delivered -- see the warnings above", file=sys.stderr)
+        return 1
+
     try:
         return run_poll(config, args)
     except BrokenPipeError:
