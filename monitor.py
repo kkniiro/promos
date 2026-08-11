@@ -379,38 +379,72 @@ def fetch_via_bot(config: dict, state: dict) -> tuple[list[dict], dict]:
 # Source: public channel web preview
 # --------------------------------------------------------------------------
 
+# Blocks worth reading inside a post. The link preview matters as much as the
+# caption: channels that post a teaser ("MOLETOM DE BRUXO") put the actual
+# product name and price only in the preview of the link they attach.
+_TEXT_BLOCKS = (
+    "tgme_widget_message_text",
+    "link_preview_title",
+    "link_preview_description",
+    "link_preview_site_name",
+)
+
+
 class _ChannelParser(HTMLParser):
     """Pulls message text + permalink out of a t.me/s/<channel> page.
 
     Telegram renders each post as
       <div class="tgme_widget_message" data-post="chan/123">
-        ... <div class="tgme_widget_message_text">body</div>
-    We track nesting depth so we stop collecting at the right closing tag.
+        <div class="tgme_widget_message_text">caption</div>
+        <a class="tgme_widget_message_link_preview">
+          <div class="link_preview_title">product name</div> ...
+        <time datetime="...">
+
+    Everything after the caption -- preview, timestamp -- belongs to the same
+    post, so fragments are accumulated per data-post id and the list is
+    materialised at the end. Collecting as we go and emitting at the caption's
+    closing tag would drop each of those, since they are parsed later.
     """
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.posts: list[dict] = []
+        self._entries: dict[str, dict] = {}
+        self._order: list[str] = []
         self._post: str | None = None
-        self._time: str | None = None
         self._depth = 0
         self._buf: list[str] = []
+
+    def _entry(self, post_id):
+        if post_id not in self._entries:
+            self._entries[post_id] = {"post": post_id, "parts": [], "time": None}
+            self._order.append(post_id)
+        return self._entries[post_id]
+
+    @property
+    def posts(self) -> list[dict]:
+        out = []
+        for post_id in self._order:
+            entry = self._entries[post_id]
+            seen, parts = set(), []
+            for part in entry["parts"]:
+                # A preview often repeats the caption; keep it once.
+                if part and part not in seen:
+                    seen.add(part)
+                    parts.append(part)
+            text = re.sub(r"\n{3,}", "\n\n", "\n".join(parts)).strip()
+            if text:
+                out.append({"post": post_id, "text": text, "time": entry["time"]})
+        return out
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = (attrs.get("class") or "").split()
         if "tgme_widget_message" in classes and attrs.get("data-post"):
             self._post = attrs["data-post"]
-            self._time = None
+            self._entry(self._post)
         if tag == "time" and attrs.get("datetime") and self._post:
-            # Telegram renders <time> in the footer, AFTER the text block, so
-            # the post has already been emitted -- backfill it rather than
-            # stashing a value that would always still be None on emit.
-            self._time = attrs["datetime"]
-            for post in reversed(self.posts):
-                if post["post"] == self._post:
-                    post["time"] = post["time"] or attrs["datetime"]
-                    break
+            entry = self._entry(self._post)
+            entry["time"] = entry["time"] or attrs["datetime"]
         if self._depth:
             # Already inside a text block: keep track of nesting.
             if tag not in ("br", "img", "hr", "input", "meta", "link"):
@@ -418,7 +452,7 @@ class _ChannelParser(HTMLParser):
             if tag == "br":
                 self._buf.append("\n")
             return
-        if "tgme_widget_message_text" in classes:
+        if any(c in classes for c in _TEXT_BLOCKS):
             self._depth = 1
             self._buf = []
 
@@ -426,9 +460,9 @@ class _ChannelParser(HTMLParser):
         if self._depth:
             self._depth -= 1
             if self._depth == 0:
-                text = re.sub(r"\n{3,}", "\n\n", "".join(self._buf)).strip()
+                text = "".join(self._buf).strip()
                 if text and self._post:
-                    self.posts.append({"post": self._post, "text": text, "time": self._time})
+                    self._entry(self._post)["parts"].append(text)
                 self._buf = []
 
     def handle_data(self, data):
@@ -1095,6 +1129,41 @@ def self_test() -> int:
     """
     parser = _ChannelParser()
     parser.feed(sample)
+
+    # A teaser caption whose product name lives only in the link preview.
+    teaser = """
+    <div class="tgme_widget_message" data-post="loba/9">
+      <div class="tgme_widget_message_text">MOLETOM DE BRUXO E DESCONTO DE TROUXA</div>
+      <a class="tgme_widget_message_link_preview" href="https://x">
+        <div class="link_preview_site_name">Amazon</div>
+        <div class="link_preview_title">Monitor Gamer 27 165Hz</div>
+        <div class="link_preview_description">Por R$ 899,00 a vista</div>
+      </a>
+      <time datetime="2026-08-11T11:00:00+00:00"></time>
+    </div>
+    """
+    tp = _ChannelParser()
+    tp.feed(teaser)
+    check("preview post count", len(tp.posts), 1)
+    check("preview keeps caption", "MOLETOM" in tp.posts[0]["text"], True)
+    check("preview adds product", "Monitor Gamer 27" in tp.posts[0]["text"], True)
+    check("preview adds price", extract_prices(tp.posts[0]["text"]), [899.0])
+    check("preview time", tp.posts[0]["time"], "2026-08-11T11:00:00+00:00")
+    # A message with only a preview and no caption must still be produced.
+    only = _ChannelParser()
+    only.feed('<div class="tgme_widget_message" data-post="loba/10">'
+              '<div class="link_preview_title">SSD 1TB</div></div>')
+    check("preview-only post", only.posts[0]["text"], "SSD 1TB")
+    # Empty messages (media with no text at all) must not appear.
+    none_ = _ChannelParser()
+    none_.feed('<div class="tgme_widget_message" data-post="loba/11"></div>')
+    check("empty message dropped", none_.posts, [])
+    # A preview that merely repeats the caption should not double up.
+    dup = _ChannelParser()
+    dup.feed('<div class="tgme_widget_message" data-post="loba/12">'
+             '<div class="tgme_widget_message_text">SSD 1TB</div>'
+             '<div class="link_preview_title">SSD 1TB</div></div>')
+    check("duplicate preview collapsed", dup.posts[0]["text"], "SSD 1TB")
     check("html post count", len(parser.posts), 2)
     check("html first id", parser.posts[0]["post"], "promos/101")
     # <time> sits after the text block, so this only passes if it is backfilled.
